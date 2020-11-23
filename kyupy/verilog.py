@@ -1,6 +1,8 @@
-from lark import Lark, Transformer
 from collections import namedtuple
 import gzip
+
+from lark import Lark, Transformer
+
 from .circuit import Circuit, Node, Line
 from .saed import pin_index, pin_is_output
 
@@ -110,7 +112,7 @@ class VerilogTransformer(Transformer):
                             Line(c, Node(c, const, const), Node(c, s))
                     fork = c.forks[s]
                     if self.branchforks:
-                        branchfork = Node(c, fork.name + "~" + n.name)
+                        branchfork = Node(c, fork.name + "~" + n.name + "/" + p)
                         Line(c, fork, branchfork)
                         fork = branchfork
                     Line(c, fork, (n, pin_index(stmt.type, p)))
@@ -126,10 +128,9 @@ class VerilogTransformer(Transformer):
             return args[0]
         else:
             return args
-        
 
-def parse(verilog, branchforks=False) -> Circuit:
-    grammar = """
+
+grammar = """
     start: (module)*
     module: "module" name parameters ";" (_statement)* "endmodule"
     parameters: "(" [ name ( "," name )* ] ")"
@@ -143,12 +144,23 @@ def parse(verilog, branchforks=False) -> Circuit:
     instantiation: name name "(" [ pin ( "," pin )* ] ")" ";"
     pin: "." name "(" name ")"
     signal: ( name | "[" /[0-9]+/ ":" /[0-9]+/ "]" name )
-    
+
     name: ( /[a-z_][a-z0-9_\\[\\]]*/i | /\\\\[^\\t \\r\\n]+[\\t \\r\\n](\\[[0-9]+\\])?/i | /1'b0/i | /1'b1/i )
     COMMENT: "//" /[^\\n]*/
     %ignore ( /\\r?\\n/ | COMMENT )+
     %ignore /[\\t \\f]+/
     """
+
+
+def loads(s, *, branchforks=False):
+    return Lark(grammar, parser="lalr", transformer=VerilogTransformer(branchforks)).parse(s)
+
+
+def load(fp, *, branchforks=False):
+    return loads(fp.read(), branchforks=branchforks)
+
+
+def parse(verilog, branchforks=False):
     if '\n' not in str(verilog):  # One line?: Assuming it is a file name.
         if str(verilog).endswith('.gz'):
             with gzip.open(verilog, 'rt') as f:
@@ -158,4 +170,4 @@ def parse(verilog, branchforks=False) -> Circuit:
                 text = f.read()
     else:
         text = str(verilog)
-    return Lark(grammar, parser="lalr", transformer=VerilogTransformer(branchforks)).parse(text)
+    return loads(text, branchforks=branchforks)

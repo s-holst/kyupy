@@ -45,6 +45,7 @@ class MockCuda:
         self.y = 0
 
     def jit(self, device=False):
+        _ = device  # silence "not used" warning
         outer = self
 
         def make_launcher(func):
@@ -84,6 +85,7 @@ class MockCuda:
         pass
 
     def grid(self, dims):
+        _ = dims  # silence "not used" warning
         return self.x, self.y
 
 

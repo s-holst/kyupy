@@ -170,7 +170,7 @@ class SdfTransformer(Transformer):
         return DelayFile(name, cells)
 
 
-def parse(sdf) -> DelayFile:
+def parse(sdf):
     grammar = r"""
     start: "(DELAYFILE" ( "(SDFVERSION" _NOB ")"
         | "(DESIGN" "\"" NAME "\"" ")"
