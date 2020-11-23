@@ -26,10 +26,10 @@ def test_wave_eval():
     a = state[0:16, 0]
     b = state[16:32, 0]
     z = state[32:, 0]
-    sat = np.zeros((3, 2), dtype='int')
-    sat[0] = 0, 16
-    sat[1] = 16, 16
-    sat[2] = 32, 16
+    sat = np.zeros((3, 3), dtype='int')
+    sat[0] = 0, 16, 0
+    sat[1] = 16, 16, 0
+    sat[2] = 32, 16, 0
 
     wave_eval((0b0111, 2, 0, 1), state, sat, 0, line_times)
     assert TMIN == z[0]

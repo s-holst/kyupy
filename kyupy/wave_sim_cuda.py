@@ -4,6 +4,7 @@ from .wave_sim import WaveSim
 from . import cuda
 
 TMAX = np.float32(2 ** 127)  # almost np.PINF for 32-bit floating point values
+TMAX_OVL = np.float32(1.1 * 2 ** 127)  # almost np.PINF with overflow mark
 TMIN = np.float32(-2 ** 127)  # almost np.NINF for 32-bit floating point values
 
 
@@ -64,7 +65,7 @@ class WaveSimCuda(WaveSim):
     def wave(self, line, vector):
         if line < 0:
             return None
-        mem, wcap = self.sat[line]
+        mem, wcap, _ = self.sat[line]
         if mem < 0:
             return None
         return self.d_state[mem:mem + wcap, vector]
@@ -86,16 +87,41 @@ class WaveSimCuda(WaveSim):
         reassign_kernel[grid_dim, self._block_dim](self.d_state, self.d_sat, self.ppi_offset, self.ppo_offset,
                                                    self.d_cdata, time)
         cuda.synchronize()
+        
+    def wavecaps(self):
+        gx = math.ceil(len(self.circuit.lines) / 512)
+        wavecaps_kernel[gx, 512](self.d_state, self.d_sat, self.sims)
+        self.sat[...] = self.d_sat
+        return self.sat[..., 2]
 
 
+@cuda.jit()
+def wavecaps_kernel(state, sat, sims):
+    idx = cuda.grid(1)
+    if idx >= len(sat): return
+    
+    lidx, lcap, _ = sat[idx]
+    if lidx < 0: return
+    
+    wcap = 0
+    for sidx in range(sims):
+        for tidx in range(lcap):
+            t = state[lidx + tidx, sidx]
+            if tidx > wcap:
+                wcap = tidx
+            if t >= TMAX: break
+
+    sat[idx, 2] = wcap + 1
+    
+    
 @cuda.jit()
 def reassign_kernel(state, sat, ppi_offset, ppo_offset, cdata, ppi_time):
     vector, y = cuda.grid(2)
     if vector >= state.shape[-1]: return
     if ppo_offset + y >= len(sat): return
 
-    ppo, ppo_cap = sat[ppo_offset + y]
-    ppi, ppi_cap = sat[ppi_offset + y]
+    ppo, ppo_cap, _ = sat[ppo_offset + y]
+    ppi, ppi_cap, _ = sat[ppi_offset + y]
     if ppo < 0: return
     if ppi < 0: return
 
@@ -121,7 +147,7 @@ def reassign_kernel(state, sat, ppi_offset, ppo_offset, cdata, ppi_time):
 def capture_kernel(state, sat, ppo_offset, cdata, time, s_sqrt2, seed):
     x, y = cuda.grid(2)
     if ppo_offset + y >= len(sat): return
-    line, tdim = sat[ppo_offset + y]
+    line, tdim, _ = sat[ppo_offset + y]
     if line < 0: return
     if x >= state.shape[-1]: return
     vector = x
@@ -130,11 +156,15 @@ def capture_kernel(state, sat, ppo_offset, cdata, time, s_sqrt2, seed):
     eat = TMAX
     lst = TMIN
     tog = 0
+    ovl = 0
     val = int(0)
     final = int(0)
     for tidx in range(tdim):
         t = state[line + tidx, vector]
-        if t >= TMAX: break
+        if t >= TMAX:
+            if t == TMAX_OVL:
+                ovl = 1
+            break
         m = -m
         final ^= 1
         if t < time:
@@ -167,6 +197,7 @@ def capture_kernel(state, sat, ppo_offset, cdata, time, s_sqrt2, seed):
     cdata[y, vector, 3] = (val != final)
     cdata[y, vector, 4] = eat
     cdata[y, vector, 5] = lst
+    cdata[y, vector, 6] = ovl
 
 
 @cuda.jit()
@@ -219,12 +250,13 @@ def wave_kernel(ops, op_start, op_stop, state, sat, st_start, st_stop, line_time
     z_idx = ops[op_idx, 1]
     a_idx = ops[op_idx, 2]
     b_idx = ops[op_idx, 3]
-
-    z_mem, z_cap = sat[z_idx]
-    a_mem = sat[a_idx, 0]
-    b_mem = sat[b_idx, 0]
+    overflows = int(0)
 
     _seed = (seed << 4) + (z_idx << 20) + (st_idx << 1)
+
+    a_mem = sat[a_idx, 0]
+    b_mem = sat[b_idx, 0]
+    z_mem, z_cap, _ = sat[z_idx]
 
     a_cur = int(0)
     b_cur = int(0)
@@ -268,7 +300,7 @@ def wave_kernel(ops, op_start, op_stop, state, sat, st_start, st_stop, line_time
                     previous_t = current_t
                     z_cur += 1
                 else:
-                    # overflows += 1
+                    overflows += 1
                     previous_t = state[z_mem + z_cur - 1, st_idx]
                     z_cur -= 1
             else:
@@ -278,5 +310,8 @@ def wave_kernel(ops, op_start, op_stop, state, sat, st_start, st_stop, line_time
                 else:
                     previous_t = TMIN
         current_t = min(a, b)
-
-    state[z_mem + z_cur, st_idx] = TMAX
+        
+    if overflows > 0:
+        state[z_mem + z_cur, st_idx] = TMAX_OVL
+    else:
+        state[z_mem + z_cur, st_idx] = a if a > b else b  # propagate overflow flags by storing biggest TMAX from input

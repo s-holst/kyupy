@@ -4,6 +4,7 @@ from . import numba
 
 
 TMAX = np.float32(2 ** 127)  # almost np.PINF for 32-bit floating point values
+TMAX_OVL = np.float32(1.1 * 2 ** 127)  # almost np.PINF with overflow mark
 TMIN = np.float32(-2 ** 127)  # almost np.NINF for 32-bit floating point values
 
 
@@ -16,7 +17,7 @@ class WaveSim:
 
         self.lst_eat_valid = False
 
-        self.cdata = np.zeros((len(self.interface), sims, 6), dtype='float32')
+        self.cdata = np.zeros((len(self.interface), sims, 7), dtype='float32')
 
         if type(wavecaps) is int:
             wavecaps = [wavecaps] * len(circuit.lines)
@@ -25,25 +26,25 @@ class WaveSim:
 
         # state allocation table. maps line and interface indices to self.state memory locations
 
-        self.sat = np.zeros((len(circuit.lines) + 2 + 2 * len(self.interface), 2), dtype='int')
+        self.sat = np.zeros((len(circuit.lines) + 2 + 2 * len(self.interface), 3), dtype='int')
         self.sat[:, 0] = -1
         filled = 0
         for lidx, cap in enumerate(wavecaps):
-            self.sat[lidx] = filled, cap
+            self.sat[lidx] = filled, cap, 0
             filled += cap
 
         self.zero_idx = len(circuit.lines)
-        self.sat[self.zero_idx] = filled, intf_wavecap
+        self.sat[self.zero_idx] = filled, intf_wavecap, 0
         filled += intf_wavecap
         self.tmp_idx = self.zero_idx + 1
-        self.sat[self.tmp_idx] = filled, intf_wavecap
+        self.sat[self.tmp_idx] = filled, intf_wavecap, 0
         filled += intf_wavecap
 
         self.ppi_offset = self.tmp_idx + 1
         self.ppo_offset = self.ppi_offset + len(self.interface)
         for i, n in enumerate(self.interface):
             if len(n.outs) > 0:
-                self.sat[self.ppi_offset + i] = filled, intf_wavecap
+                self.sat[self.ppi_offset + i] = filled, intf_wavecap, 0
                 filled += intf_wavecap
             if len(n.ins) > 0:
                 self.sat[self.ppo_offset + i] = self.sat[n.ins[0].index]
@@ -161,7 +162,7 @@ class WaveSim:
     def wave(self, line, vector):
         if line < 0:
             return [TMAX]
-        mem, wcap = self.sat[line]
+        mem, wcap, _ = self.sat[line]
         if mem < 0:
             return [TMAX]
         return self.state[mem:mem + wcap, vector]
@@ -186,8 +187,8 @@ class WaveSim:
 
     def reassign(self, time=0.0):
         for i, node in enumerate(self.interface):
-            ppi_loc = self.sat[self.ppi_offset + i]
-            ppo_loc = self.sat[self.ppo_offset + i]
+            ppi_loc = self.sat[self.ppi_offset + i, 0]
+            ppo_loc = self.sat[self.ppo_offset + i, 0]
             if ppi_loc < 0 or ppo_loc < 0: continue
             for sidx in range(self.sims):
                 ival = self.val(self.ppi_offset + i, sidx, TMAX) > 0.5
@@ -274,10 +275,14 @@ class WaveSim:
         eat = TMAX
         lst = TMIN
         tog = 0
+        ovl = 0
         val = int(0)
         final = int(0)
         for t in self.wave(line, vector):
-            if t >= TMAX: break
+            if t >= TMAX:
+                if t == TMAX_OVL:
+                    ovl = 1
+                break
             m = -m
             final ^= 1
             if t < time:
@@ -304,7 +309,7 @@ class WaveSim:
         else:
             acc = val
 
-        return acc, val, final, (val != final), eat, lst
+        return acc, val, final, (val != final), eat, lst, ovl
 
 
 @numba.njit
@@ -342,7 +347,7 @@ def wave_eval(op, state, sat, st_idx, line_times, sd=0.0, seed=0):
 
     a_mem = sat[a_idx, 0]
     b_mem = sat[b_idx, 0]
-    z_mem, z_cap = sat[z_idx]
+    z_mem, z_cap, _ = sat[z_idx]
 
     a_cur = int(0)
     b_cur = int(0)
@@ -397,5 +402,9 @@ def wave_eval(op, state, sat, st_idx, line_times, sd=0.0, seed=0):
                     previous_t = TMIN
         current_t = min(a, b)
 
-    state[z_mem + z_cur, st_idx] = TMAX
+    if overflows > 0:
+        state[z_mem + z_cur, st_idx] = TMAX_OVL
+    else:
+        state[z_mem + z_cur, st_idx] = a if a > b else b  # propagate overflow flags by storing biggest TMAX from input
+        
     return overflows
