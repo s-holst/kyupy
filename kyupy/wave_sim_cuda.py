@@ -9,8 +9,8 @@ TMIN = np.float32(-2 ** 127)  # almost np.NINF for 32-bit floating point values
 
 
 class WaveSimCuda(WaveSim):
-    def __init__(self, circuit, timing, sims=8, wavecaps=16):
-        super().__init__(circuit, timing, sims, wavecaps)
+    def __init__(self, circuit, timing, sims=8, wavecaps=16, strip_forks=False, keep_waveforms=True):
+        super().__init__(circuit, timing, sims, wavecaps, strip_forks, keep_waveforms)
 
         self.tdata = np.zeros((len(self.interface), 3, (sims - 1) // 8 + 1), dtype='uint8')
 

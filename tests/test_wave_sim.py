@@ -130,6 +130,14 @@ def test_b14(mydir):
     compare_to_logic_sim(wsim)
 
 
+def test_b14_strip_forks(mydir):
+    c = verilog.parse(mydir / 'b14.v.gz', branchforks=True)
+    df = sdf.parse(mydir / 'b14.sdf.gz')
+    lt = df.annotation(c, pin_index)
+    wsim = WaveSim(c, lt, 8, strip_forks=True)
+    compare_to_logic_sim(wsim)
+
+
 def test_b14_cuda(mydir):
     c = verilog.parse(mydir / 'b14.v.gz', branchforks=True)
     df = sdf.parse(mydir / 'b14.sdf.gz')
