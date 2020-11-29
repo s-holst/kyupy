@@ -70,15 +70,15 @@ class WaveSimCuda(WaveSim):
             return None
         return self.d_state[mem:mem + wcap, vector]
     
-    def capture(self, time=TMAX, sd=0, seed=1, probabilities=None, offset=0):
+    def capture(self, time=TMAX, sd=0, seed=1, cdata=None, offset=0):
         grid_dim = self._grid_dim(self.sims, len(self.interface))
         capture_kernel[grid_dim, self._block_dim](self.d_state, self.d_sat, self.ppo_offset,
                                                   self.d_cdata, time, sd * math.sqrt(2), seed)
         self.cdata[...] = self.d_cdata
-        if probabilities is not None:
-            assert offset < probabilities.shape[1]
-            cap_dim = min(probabilities.shape[1] - offset, self.sims)
-            probabilities[:, offset:cap_dim + offset] = self.cdata[:, 0:cap_dim, 0]
+        if cdata is not None:
+            assert offset < cdata.shape[1]
+            cap_dim = min(cdata.shape[1] - offset, self.sims)
+            cdata[:, offset:cap_dim + offset] = self.cdata[:, 0:cap_dim]
         self.lst_eat_valid = True
         return self.cdata
 

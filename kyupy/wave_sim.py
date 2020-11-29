@@ -284,15 +284,15 @@ class WaveSim:
     def wave_ppo(self, o, vector):
         return self.wave(self.ppo_offset + o, vector)
 
-    def capture(self, time=TMAX, sd=0, seed=1, probabilities=None, offset=0):
+    def capture(self, time=TMAX, sd=0, seed=1, cdata=None, offset=0):
         for i, node in enumerate(self.interface):
             if len(node.ins) == 0: continue
             for p in range(self.sims):
                 self.cdata[i, p] = self.capture_wave(self.ppo_offset + i, p, time, sd, seed)
-        if probabilities is not None:
-            assert offset < probabilities.shape[1]
-            cap_dim = min(probabilities.shape[1] - offset, self.sims)
-            probabilities[:, offset:cap_dim + offset] = self.cdata[:, 0:cap_dim, 0]
+        if cdata is not None:
+            assert offset < cdata.shape[1]
+            cap_dim = min(cdata.shape[1] - offset, self.sims)
+            cdata[:, offset:cap_dim + offset] = self.cdata[:, 0:cap_dim]
         self.lst_eat_valid = True
         return self.cdata
 

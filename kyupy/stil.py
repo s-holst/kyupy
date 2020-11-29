@@ -109,7 +109,7 @@ class StilFile:
         interface, pi_map, po_map, scan_maps, scan_inversions = self._maps(c)
         resp = PackedVectors(len(self.patterns), len(interface), 2)
         for i, p in enumerate(self.patterns):
-            if (len(p.capture) > 0):
+            if len(p.capture) > 0:
                 resp.set_values(i, p.capture['_po'], po_map)
             else:
                 resp.set_values(i, p.launch['_po'], po_map)

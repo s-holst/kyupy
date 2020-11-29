@@ -100,15 +100,14 @@ def compare_to_logic_sim(wsim):
     tests.randomize()
     wsim.assign(tests)
     wsim.propagate(8)
-    cap = np.zeros((len(wsim.interface), wsim.sims))
-    wsim.capture(probabilities=cap)
+    cdata = wsim.capture()
 
     resp = tests.copy()
 
     for iidx, inode in enumerate(wsim.interface):
         if len(inode.ins) > 0:
             for vidx in range(wsim.sims):
-                resp.set_value(vidx, iidx, 0 if cap[iidx, vidx] < 0.5 else 1)
+                resp.set_value(vidx, iidx, 0 if cdata[iidx, vidx, 0] < 0.5 else 1)
 
     lsim = LogicSim(wsim.circuit, len(tests), 3)
     lsim.assign(tests)
