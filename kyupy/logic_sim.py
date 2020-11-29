@@ -23,6 +23,7 @@ class LogicSim:
         self.input_vd1 = self.fork_vd1
         self.output_vd1 = self.fork_vd1
         self.inv_vd1 = self.not_vd1
+        self.ibuff_vd1 = self.not_vd1
         self.nbuff_vd1 = self.fork_vd1
         self.xor2_vd1 = self.xor_vd1
         
@@ -31,6 +32,7 @@ class LogicSim:
         self.input_vd2 = self.fork_vd2
         self.output_vd2 = self.fork_vd2
         self.inv_vd2 = self.not_vd2
+        self.ibuff_vd2 = self.not_vd2
         self.nbuff_vd2 = self.fork_vd2
         self.xor2_vd2 = self.xor_vd2
         
@@ -39,6 +41,7 @@ class LogicSim:
         self.input_vd3 = self.fork_vd3
         self.output_vd3 = self.fork_vd3
         self.inv_vd3 = self.not_vd3
+        self.ibuff_vd3 = self.not_vd3
         self.nbuff_vd3 = self.fork_vd3
         self.xor2_vd3 = self.xor_vd3
         

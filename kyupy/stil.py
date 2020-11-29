@@ -28,7 +28,7 @@ class StilFile:
                 for so_port in self.so_ports:
                     if so_port in call.parameters:
                         unload[so_port] = call.parameters[so_port].replace('\n', '')
-                if len(capture) > 0:
+                if len(launch) > 0:
                     self.patterns.append(ScanPattern(load, launch, capture, unload))
                     capture = {}
                     launch = {}
@@ -100,7 +100,7 @@ class StilFile:
             if ('P' not in p.launch['_pi']) or ('P' not in p.capture['_pi']):
                 for si_port in self.si_ports.keys():
                     launch.set_values(i, p.load[si_port], scan_maps[si_port], scan_inversions[si_port])
-            if 'P' in p.capture['_pi']:
+            if '_pi' in p.capture and 'P' in p.capture['_pi']:
                 launch.set_values(i, p.capture['_pi'], pi_map)
         
         return PackedVectors.from_pair(init, launch)
@@ -109,7 +109,10 @@ class StilFile:
         interface, pi_map, po_map, scan_maps, scan_inversions = self._maps(c)
         resp = PackedVectors(len(self.patterns), len(interface), 2)
         for i, p in enumerate(self.patterns):
-            resp.set_values(i, p.capture['_po'], po_map)
+            if (len(p.capture) > 0):
+                resp.set_values(i, p.capture['_po'], po_map)
+            else:
+                resp.set_values(i, p.launch['_po'], po_map)
             for so_port in self.so_ports.keys():
                 resp.set_values(i, p.unload[so_port], scan_maps[so_port], scan_inversions[so_port])
         return resp
