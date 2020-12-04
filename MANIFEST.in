@@ -1,0 +1,7 @@
+include *.ipynb
+include *.txt
+recursive-include tests *.bench
+recursive-include tests *.gz
+recursive-include tests *.py
+recursive-include tests *.sdf
+recursive-include tests *.v
