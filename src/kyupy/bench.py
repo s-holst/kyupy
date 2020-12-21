@@ -1,5 +1,16 @@
+"""A parser for the ISCAS89 benchmark format.
+
+The ISCAS89 benchmark format (`.bench`-suffix) is a very simple textual description of gate-level netlists.
+Historically it was first used in the
+`ISCAS89 benchmark set <https://people.engr.ncsu.edu/brglez/CBL/benchmarks/ISCAS89/>`_.
+Besides loading these benchmarks, this module is also useful for easily constructing simple circuits:
+``c = bench.parse('input(x, y) output(a, o, n) a=and(x,y) o=or(x,y) n=not(x)')``.
+"""
+
 from lark import Lark, Transformer
+
 from .circuit import Circuit, Node, Line
+from . import readtext
 
 
 class BenchTransformer(Transformer):
@@ -19,10 +30,9 @@ class BenchTransformer(Transformer):
         cell = Node(self.c, str(name), str(cell_type))
         Line(self.c, cell, self.c.get_or_add_fork(str(name)))
         [Line(self.c, d, cell) for d in drivers]
-        
 
-def parse(bench):
-    grammar = r"""
+
+grammar = r"""
     start: (statement)*
     statement: input | output | assignment
     input: ("INPUT" | "input") parameters -> interface
@@ -32,12 +42,23 @@ def parse(bench):
     NAME: /[-_a-z0-9]+/i
     %ignore ( /\r?\n/ | "#" /[^\n]*/ | /[\t\f ]/ )+
     """
-    name = None
-    if '(' not in str(bench):  # No parentheses?: Assuming it is a file name.
-        name = str(bench).replace('.bench', '')
-        with open(bench, 'r') as f:
-            text = f.read()
-    else:
-        text = bench
+
+
+def parse(text, name=None):
+    """Parses the given ``text`` as ISCAS89 bench code.
+
+    :param text: A string with bench code.
+    :param name: The name of the circuit. Circuit names are not included in bench descriptions.
+    :return: A :class:`Circuit` object.
+    """
     return Lark(grammar, parser="lalr", transformer=BenchTransformer(name)).parse(text)
 
+
+def load(file, name=None):
+    """Parses the contents of ``file`` as ISCAS89 bench code.
+
+    :param file: The file to be loaded.
+    :param name: The name of the circuit. If none given, the file name is used as circuit name.
+    :return: A :class:`Circuit` object.
+    """
+    return parse(readtext(file), name=name or str(file))

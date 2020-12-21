@@ -1,6 +1,51 @@
 from kyupy.circuit import Circuit, Node, Line
 
 
+def test_lines():
+    c = Circuit()
+    n1 = Node(c, 'n1')
+    n2 = Node(c, 'n2')
+    line = Line(c, n1, n2)
+
+    assert line.driver == n1
+    assert line.reader == n2
+    assert line.driver_pin == 0
+    assert line.reader_pin == 0
+    assert n1.outs[0] == line
+    assert n2.ins[0] == line
+
+    line2 = Line(c, n1, (n2, 2))
+
+    assert line2.driver == n1
+    assert line2.reader == n2
+    assert line2.driver_pin == 1
+    assert line2.reader_pin == 2
+    assert n1.outs[0] == line
+    assert n1.outs[1] == line2
+    assert n2.ins[1] is None
+    assert n2.ins[2] == line2
+
+    line3 = Line(c, n1, n2)
+
+    assert line3.driver_pin == 2
+    assert line3.reader_pin == 1
+    assert n1.outs[2] == line3
+    assert n2.ins[1] == line3
+    assert n2.ins[2] == line2
+
+    assert len(c.lines) == 3
+
+    line3.remove()
+
+    assert len(c.lines) == 2
+    assert c.lines[0].index == 0
+    assert c.lines[1].index == 1
+
+    assert n1.outs[2] is None
+    assert n2.ins[1] is None
+    assert n2.ins[2] == line2
+
+
 def test_circuit():
     c = Circuit()
     in1 = Node(c, 'in1', 'buf')

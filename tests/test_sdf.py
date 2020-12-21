@@ -74,13 +74,13 @@ def test_parse():
 
 
 def test_b14(mydir):
-    df = sdf.parse(mydir / 'b14.sdf.gz')
+    df = sdf.load(mydir / 'b14.sdf.gz')
     assert df.name == 'b14'
 
 
 def test_gates(mydir):
-    c = verilog.parse(mydir / 'gates.v')
-    df = sdf.parse(mydir / 'gates.sdf')
+    c = verilog.load(mydir / 'gates.v')
+    df = sdf.load(mydir / 'gates.sdf')
     lt = df.annotation(c, pin_index, dataset=1)
     nand_a = c.cells['nandgate'].ins[0]
     nand_b = c.cells['nandgate'].ins[1]

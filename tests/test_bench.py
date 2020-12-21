@@ -5,7 +5,7 @@ def test_b01(mydir):
     with open(mydir / 'b01.bench', 'r') as f:
         c = bench.parse(f.read())
         assert 92 == len(c.nodes)
-    c = bench.parse(mydir / 'b01.bench')
+    c = bench.load(mydir / 'b01.bench')
     assert 92 == len(c.nodes)
 
 

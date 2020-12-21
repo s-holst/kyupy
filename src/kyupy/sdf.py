@@ -1,14 +1,28 @@
+"""A simple and incomplete parser for the Standard Delay Format (SDF).
+
+The main purpose of this parser is to extract pin-to-pin delay and interconnect delay information from SDF files.
+Sophisticated timing specifications (timing checks, conditional delays, etc.) are currently not supported.
+
+The functions :py:func:`load` and :py:func:`read` return an intermediate representation (:class:`DelayFile` object).
+Call :py:func:`DelayFile.annotation` to match the intermediate representation to a given circuit.
+
+"""
+
+from collections import namedtuple
+
 import numpy as np
 from lark import Lark, Transformer
-from collections import namedtuple
-from . import log
-import gzip
+
+from . import log, readtext
+
 
 Interconnect = namedtuple('Interconnect', ['orig', 'dest', 'r', 'f'])
 IOPath = namedtuple('IOPath', ['ipin', 'opin', 'r', 'f'])
 
 
 class DelayFile:
+    """An intermediate representation of an SDF file.
+    """
     def __init__(self, name, cells):
         self.name = name
         if None in cells:
@@ -22,26 +36,26 @@ class DelayFile:
                '\n'.join(str(i) for i in self.interconnects)
 
     def annotation(self, circuit, pin_index_f, dataset=1, interconnect=True, ffdelays=True):
-        """
-        Constructs an 3-dimensional array with timing data for each line in `circuit`.
-        Dimension 1 of the returned array is the line index.
-        Dimension 2 is the type of timing data: 0:`delay`, 1:`pulse rejection limit`.
-        Dimension 3 is the polarity at the output of the reading node: 0:`rising`, 1:`falling`.
-
-        The polarity for pulse rejection is determined by the latter transition of the pulse.
-        E.g., timing[42,1,0] is the rejection limit of a negative pulse at the output of the reader of line 42.
+        """Constructs an 3-dimensional ndarray with timing data for each line in ``circuit``.
 
         An IOPATH delay for a node is annotated to the line connected to the input pin specified in the IOPATH.
 
         Currently, only ABSOLUTE IOPATH and INTERCONNECT delays are supported.
         Pulse rejection limits are derived from absolute delays, explicit declarations (PATHPULSE etc.) are ignored.
 
-
+        :param circuit:
+        :param pin_index_f:
         :param ffdelays:
         :param interconnect:
-        :param pin_index_f:
-        :param circuit:
         :type dataset: int or tuple
+        :return: A 3-dimensional ndarray with timing data.
+
+            * Axis 0: line index.
+            * Axis 1: type of timing data: 0=`delay`, 1=`pulse rejection limit`.
+            * Axis 2: The polarity of the output transition of the reading node: 0=`rising`, 1=`falling`.
+
+            The polarity for pulse rejection is determined by the latter transition of the pulse.
+            E.g., timing[42,1,0] is the rejection limit of a negative pulse at the output of the reader of line 42.
         """
         def select_del(_delvals, idx):
             if type(dataset) is tuple:
@@ -170,8 +184,7 @@ class SdfTransformer(Transformer):
         return DelayFile(name, cells)
 
 
-def parse(sdf):
-    grammar = r"""
+grammar = r"""
     start: "(DELAYFILE" ( "(SDFVERSION" _NOB ")"
         | "(DESIGN" "\"" NAME "\"" ")"
         | "(DATE" _NOB ")"
@@ -201,13 +214,16 @@ def parse(sdf):
     %ignore ( /\r?\n/ | COMMENT )+
     %ignore /[\t\f ]+/
     """
-    if '\n' not in str(sdf):  # One line?: Assuming it is a file name.
-        if str(sdf).endswith('.gz'):
-            with gzip.open(sdf, 'rt') as f:
-                text = f.read()
-        else:
-            with open(sdf, 'r') as f:
-                text = f.read()
-    else:
-        text = str(sdf)
+
+
+def parse(text):
+    """Parses the given ``text`` and returns a :class:`DelayFile` object."""
     return Lark(grammar, parser="lalr", transformer=SdfTransformer()).parse(text)
+
+
+def load(file):
+    """Parses the contents of ``file`` and returns a :class:`DelayFile` object.
+
+    The given file may be gzip compressed.
+    """
+    return parse(readtext(file))

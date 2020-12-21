@@ -3,3 +3,8 @@
 **/.pytest_cache
 **/.DS_Store
 **/*.pyc
+docs/_build
+build
+dist
+.idea
+src/kyupy.egg-info

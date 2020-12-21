@@ -1,10 +1,13 @@
-"""This package provides tools for high-performance processing and validation
-of non-hierarchical VLSI circuits to aid rapid prototyping of research code
-in the fields of VLSI test, diagnosis and reliability.
+"""A package for processing and analysis of non-hierarchical gate-level VLSI designs.
+
+It contains fundamental building blocks for research software in the fields of VLSI test, diagnosis and reliability.
 """
 
 import time
 import importlib.util
+import gzip
+
+import numpy as np
 
 
 class Log:
@@ -97,12 +100,27 @@ if importlib.util.find_spec('numba') is not None:
         list(numba.cuda.gpus)
         from numba import cuda
     except CudaSupportError:
-        log.warn('Cuda unavailable. Falling back to pure python')
+        log.warn('Cuda unavailable. Falling back to pure Python.')
         cuda = MockCuda()
 else:
     numba = MockNumba()
     cuda = MockCuda()
-    log.warn('Numba unavailable. Falling back to pure python')
+    log.warn('Numba unavailable. Falling back to pure Python.')
 
 
+_pop_count_lut = np.asarray([bin(x).count('1') for x in range(256)])
 
+
+def popcount(a):
+    return np.sum(_pop_count_lut[a])
+
+
+def readtext(file):
+    if hasattr(file, 'read'):
+        return file.read()
+    if str(file).endswith('.gz'):
+        with gzip.open(file, 'rt') as f:
+            return f.read()
+    else:
+        with open(file, 'rt') as f:
+            return f.read()

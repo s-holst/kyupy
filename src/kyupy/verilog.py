@@ -1,8 +1,14 @@
+"""A simple and incomplete parser for Verilog files.
+
+The main purpose of this parser is to load synthesized, non-hierarchical (flat) gate-level netlists.
+It supports only a very limited subset of Verilog.
+"""
+
 from collections import namedtuple
-import gzip
 
 from lark import Lark, Transformer
 
+from . import readtext
 from .circuit import Circuit, Node, Line
 from .saed import pin_index, pin_is_output
 
@@ -152,22 +158,21 @@ grammar = """
     """
 
 
-def loads(s, *, branchforks=False):
-    return Lark(grammar, parser="lalr", transformer=VerilogTransformer(branchforks)).parse(s)
+def parse(text, *, branchforks=False):
+    """Parses the given ``text`` as Verilog code.
+
+    :param text: A string with Verilog code.
+    :param branchforks: If set to ``True``, the returned circuit will include additional `forks` on each fanout branch.
+        These forks are needed to correctly annotate interconnect delays
+        (see :py:func:`kyupy.sdf.DelayFile.annotation`).
+    :return: A :class:`~kyupy.circuit.Circuit` object.
+    """
+    return Lark(grammar, parser="lalr", transformer=VerilogTransformer(branchforks)).parse(text)
 
 
-def load(fp, *, branchforks=False):
-    return loads(fp.read(), branchforks=branchforks)
+def load(file, *args, **kwargs):
+    """Parses the contents of ``file`` as Verilog code.
 
-
-def parse(verilog, branchforks=False):
-    if '\n' not in str(verilog):  # One line?: Assuming it is a file name.
-        if str(verilog).endswith('.gz'):
-            with gzip.open(verilog, 'rt') as f:
-                text = f.read()
-        else:
-            with open(verilog, 'r') as f:
-                text = f.read()
-    else:
-        text = str(verilog)
-    return loads(text, branchforks=branchforks)
+    The given file may be gzip compressed. Takes the same keyword arguments as :py:func:`parse`.
+    """
+    return parse(readtext(file), *args, **kwargs)

@@ -1,8 +1,19 @@
-from lark import Lark, Transformer
-from collections import namedtuple
+"""A simple and incomplete parser for the Standard Test Interface Language (STIL).
+
+The main purpose of this parser is to load scan pattern sets from STIL files.
+It supports only a very limited subset of STIL.
+
+The functions :py:func:`load` and :py:func:`read` return an intermediate representation (:class:`StilFile` object).
+Call :py:func:`StilFile.tests4v`, :py:func:`StilFile.tests8v`, or :py:func:`StilFile.responses4v` to
+obtain the appropriate vector sets.
+"""
+
 import re
-import gzip
-from .packed_vectors import PackedVectors
+from collections import namedtuple
+
+from lark import Lark, Transformer
+
+from . import readtext, logic
 from .logic_sim import LogicSim
 
 
@@ -11,6 +22,8 @@ ScanPattern = namedtuple('ScanPattern', ['load', 'launch', 'capture', 'unload'])
 
 
 class StilFile:
+    """An intermediate representation of a STIL file.
+    """
     def __init__(self, version, signal_groups, scan_chains, calls):
         self.version = version
         self.signal_groups = signal_groups
@@ -21,7 +34,7 @@ class StilFile:
         self.patterns = []
         launch = {}
         capture = {}
-        load = {}
+        sload = {}
         for call in self.calls:
             if call.name == 'load_unload':
                 unload = {}
@@ -29,13 +42,13 @@ class StilFile:
                     if so_port in call.parameters:
                         unload[so_port] = call.parameters[so_port].replace('\n', '')
                 if len(launch) > 0:
-                    self.patterns.append(ScanPattern(load, launch, capture, unload))
+                    self.patterns.append(ScanPattern(sload, launch, capture, unload))
                     capture = {}
                     launch = {}
-                load = {}
+                sload = {}
                 for si_port in self.si_ports:
                     if si_port in call.parameters:
-                        load[si_port] = call.parameters[si_port].replace('\n', '')
+                        sload[si_port] = call.parameters[si_port].replace('\n', '')
             if call.name.endswith('_launch') or call.name.endswith('_capture'):
                 if len(launch) == 0:
                     launch = dict((k, v.replace('\n', '')) for k, v in call.parameters.items())
@@ -73,48 +86,69 @@ class StilFile:
             scan_inversions[chain[-1]] = scan_out_inversion
         return interface, pi_map, po_map, scan_maps, scan_inversions
         
-    def tests(self, c):
-        interface, pi_map, po_map, scan_maps, scan_inversions = self._maps(c)
-        tests = PackedVectors(len(self.patterns), len(interface), 2)
+    def tests(self, circuit):
+        """Assembles and returns a scan test pattern set for given circuit.
+
+        This function assumes a static (stuck-at fault) test.
+        """
+        interface, pi_map, po_map, scan_maps, scan_inversions = self._maps(circuit)
+        tests = logic.MVArray((len(interface), len(self.patterns)))
         for i, p in enumerate(self.patterns):
             for si_port in self.si_ports.keys():
-                tests.set_values(i, p.load[si_port], scan_maps[si_port], scan_inversions[si_port])
-            tests.set_values(i, p.launch['_pi'], pi_map)
+                pattern = logic.mv_xor(p.load[si_port], scan_inversions[si_port])
+                tests.data[scan_maps[si_port], i] = pattern.data[:, 0]
+            tests.data[pi_map, i] = logic.MVArray(p.launch['_pi']).data[:, 0]
         return tests
 
-    def tests8v(self, c):
-        interface, pi_map, po_map, scan_maps, scan_inversions = self._maps(c)
-        init = PackedVectors(len(self.patterns), len(interface), 2)
+    def tests_loc(self, circuit):
+        """Assembles and returns a LoC scan test pattern set for given circuit.
+
+        This function assumes a launch-on-capture (LoC) delay test.
+        It performs a logic simulation to obtain the first capture pattern (the one that launches the
+        delay test) and assembles the test pattern set from from pairs for initialization- and launch-patterns.
+        """
+        interface, pi_map, po_map, scan_maps, scan_inversions = self._maps(circuit)
+        init = logic.MVArray((len(interface), len(self.patterns)), m=4)
+        # init = PackedVectors(len(self.patterns), len(interface), 2)
         for i, p in enumerate(self.patterns):
             # init.set_values(i, '0' * len(interface))
             for si_port in self.si_ports.keys():
-                init.set_values(i, p.load[si_port], scan_maps[si_port], scan_inversions[si_port])
-            init.set_values(i, p.launch['_pi'], pi_map)
-        sim4v = LogicSim(c, len(init), 2)
-        sim4v.assign(init)
+                pattern = logic.mv_xor(p.load[si_port], scan_inversions[si_port])
+                init.data[scan_maps[si_port], i] = pattern.data[:, 0]
+            init.data[pi_map, i] = logic.MVArray(p.launch['_pi']).data[:, 0]
+        launch_bp = logic.BPArray(init)
+        sim4v = LogicSim(circuit, len(init), m=4)
+        sim4v.assign(launch_bp)
         sim4v.propagate()
-        launch = init.copy()
-        sim4v.capture(launch)
+        sim4v.capture(launch_bp)
+        launch = logic.MVArray(launch_bp)
         for i, p in enumerate(self.patterns):
             # if there was no launch clock, then init = launch
             if ('P' not in p.launch['_pi']) or ('P' not in p.capture['_pi']):
                 for si_port in self.si_ports.keys():
-                    launch.set_values(i, p.load[si_port], scan_maps[si_port], scan_inversions[si_port])
+                    pattern = logic.mv_xor(p.load[si_port], scan_inversions[si_port])
+                    launch.data[scan_maps[si_port], i] = pattern.data[:, 0]
             if '_pi' in p.capture and 'P' in p.capture['_pi']:
-                launch.set_values(i, p.capture['_pi'], pi_map)
-        
-        return PackedVectors.from_pair(init, launch)
+                launch.data[pi_map, i] = logic.MVArray(p.capture['_pi']).data[:, 0]
+            launch.data[po_map, i] = logic.UNASSIGNED
+
+        return logic.mv_transition(init, launch)
                 
-    def responses(self, c):
-        interface, pi_map, po_map, scan_maps, scan_inversions = self._maps(c)
-        resp = PackedVectors(len(self.patterns), len(interface), 2)
+    def responses(self, circuit):
+        """Assembles and returns a scan test response pattern set for given circuit."""
+        interface, pi_map, po_map, scan_maps, scan_inversions = self._maps(circuit)
+        resp = logic.MVArray((len(interface), len(self.patterns)))
+        # resp = PackedVectors(len(self.patterns), len(interface), 2)
         for i, p in enumerate(self.patterns):
-            if len(p.capture) > 0:
-                resp.set_values(i, p.capture['_po'], po_map)
-            else:
-                resp.set_values(i, p.launch['_po'], po_map)
+            resp.data[po_map, i] = logic.MVArray(p.capture['_po'] if len(p.capture) > 0 else p.launch['_po']).data[:, 0]
+            # if len(p.capture) > 0:
+            #    resp.set_values(i, p.capture['_po'], po_map)
+            # else:
+            #    resp.set_values(i, p.launch['_po'], po_map)
             for so_port in self.so_ports.keys():
-                resp.set_values(i, p.unload[so_port], scan_maps[so_port], scan_inversions[so_port])
+                pattern = logic.mv_xor(p.unload[so_port], scan_inversions[so_port])
+                resp.data[scan_maps[so_port], i] = pattern.data[:, 0]
+                # resp.set_values(i, p.unload[so_port], scan_maps[so_port], scan_inversions[so_port])
         return resp
         
         
@@ -160,10 +194,9 @@ class StilTransformer(Transformer):
 
     def start(self, args):
         return StilFile(float(args[0]), self._signal_groups, self._scan_chains, self._calls)
-        
 
-def parse(stil):
-    grammar = r"""
+
+grammar = r"""
     start: "STIL" FLOAT _ignore _block*
     _block: signal_groups | scan_structures | pattern
         | "Header" _ignore
@@ -173,10 +206,10 @@ def parse(stil):
         | "PatternExec" _ignore
         | "Procedures" _ignore
         | "MacroDefs" _ignore
-    
+
     signal_groups: "SignalGroups" "{" signal_group* "}"
     signal_group: quoted "=" "'" quoted ( "+" quoted)* "'" _ignore? ";"?
-    
+
     scan_structures: "ScanStructures" "{" scan_chain* "}"
     scan_chain: "ScanChain" quoted "{" ( scan_length
         | scan_in | scan_out | scan_inversion | scan_cells | scan_master_clock )* "}"
@@ -186,7 +219,7 @@ def parse(stil):
     scan_inversion: "ScanInversion" /[0-9]+/ ";"
     scan_cells: "ScanCells" (quoted | /!/)* ";"
     scan_master_clock: "ScanMasterClock" quoted ";"
-    
+
     pattern: "Pattern" quoted "{" ( label | w | c | macro | ann | call )* "}"
     label: quoted ":"
     w: "W" quoted ";"
@@ -195,7 +228,7 @@ def parse(stil):
     ann: "Ann" _ignore
     call: "Call" quoted "{" call_parameter* "}"
     call_parameter: quoted "=" /[^;]+/ ";"
-        
+
     quoted: /"[^"]*"/
     FLOAT: /[-0-9.]+/
     _ignore: "{" _NOB? _ignore_inner* "}"
@@ -203,50 +236,16 @@ def parse(stil):
     _NOB: /[^{}]+/
     %ignore ( /\r?\n/ | "//" /[^\n]*/ | /[\t\f ]/ )+
     """
-    if '\n' not in str(stil):  # One line?: Assuming it is a file name.
-        if str(stil).endswith('.gz'):
-            with gzip.open(stil, 'rt') as f:
-                text = f.read()
-        else:
-            with open(stil, 'r') as f:
-                text = f.read()
-    else:
-        text = str(stil)
+
+
+def parse(text):
+    """Parses the given ``text`` and returns a :class:`StilFile` object."""
     return Lark(grammar, parser="lalr", transformer=StilTransformer()).parse(text)
 
 
-def extract_scan_pattens(stil_calls):
-    pats = []
-    pi = None
-    scan_in = None
-    for call in stil_calls:
-        if call.name == 'load_unload':
-            scan_out = call.parameters.get('Scan_Out')
-            if scan_out is not None:
-                scan_out = scan_out.replace('\n', '')
-            if pi: pats.append(ScanPattern(scan_in, pi, None, scan_out))
-            scan_in = call.parameters.get('Scan_In')
-            if scan_in is not None:
-                scan_in = scan_in.replace('\n', '')
-        if call.name == 'allclock_capture':
-            pi = call.parameters['_pi'].replace('\n', '')
-    return pats
+def load(file):
+    """Parses the contents of ``file`` and returns a :class:`StilFile` object.
 
-
-def match_patterns(stil_file, pats, interface):    
-    intf_pos = dict([(n.name, i) for i, n in enumerate(interface)])
-    pi_map = [intf_pos[n] for n in stil_file.signal_groups['_pi']]
-    scan_map = [intf_pos[re.sub(r'b..\.', '', n)] for n in reversed(stil_file.scan_chains['1'])]
-    # print(scan_map)
-    tests = PackedVectors(len(pats), len(interface), 2)
-    for i, p in enumerate(pats):
-        tests.set_values(i, p.scan_in, scan_map)
-        tests.set_values(i, p.pi, pi_map)
-
-    resp = PackedVectors(len(pats), len(interface), 2)
-    for i, p in enumerate(pats):
-        resp.set_values(i, p.pi, pi_map)
-        resp.set_values(i, p.scan_out, scan_map)
-
-    return tests, resp
-
+    The given file may be gzip compressed.
+    """
+    return parse(readtext(file))

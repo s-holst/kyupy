@@ -1,11 +1,10 @@
 import numpy as np
-from kyupy.wave_sim import WaveSim, wave_eval, TMIN, TMAX
+
+from kyupy.wave_sim import WaveSim, WaveSimCuda, wave_eval, TMIN, TMAX
 from kyupy.logic_sim import LogicSim
-from kyupy import verilog
-from kyupy import sdf
+from kyupy import verilog, sdf, logic
 from kyupy.saed import pin_index
-from kyupy.packed_vectors import PackedVectors
-from kyupy.wave_sim_cuda import WaveSimCuda
+from kyupy.logic import MVArray, BPArray
 
 
 def test_wave_eval():
@@ -96,24 +95,29 @@ def test_wave_eval():
 
 
 def compare_to_logic_sim(wsim):
-    tests = PackedVectors(wsim.sims, len(wsim.interface), 3)
-    tests.randomize()
-    wsim.assign(tests)
-    wsim.propagate(8)
+    tests = MVArray((len(wsim.interface), wsim.sims))
+    choices = np.asarray([logic.ZERO, logic.ONE, logic.RISE, logic.FALL], dtype=np.uint8)
+    rng = np.random.default_rng(10)
+    tests.data[...] = rng.choice(choices, tests.data.shape)
+    tests_bp = BPArray(tests)
+    wsim.assign(tests_bp)
+    wsim.propagate()
     cdata = wsim.capture()
 
-    resp = tests.copy()
+    resp = MVArray(tests)
 
     for iidx, inode in enumerate(wsim.interface):
         if len(inode.ins) > 0:
             for vidx in range(wsim.sims):
-                resp.set_value(vidx, iidx, 0 if cdata[iidx, vidx, 0] < 0.5 else 1)
+                resp.data[iidx, vidx] = logic.ZERO if cdata[iidx, vidx, 0] < 0.5 else logic.ONE
+                # resp.set_value(vidx, iidx, 0 if cdata[iidx, vidx, 0] < 0.5 else 1)
 
-    lsim = LogicSim(wsim.circuit, len(tests), 3)
-    lsim.assign(tests)
+    lsim = LogicSim(wsim.circuit, len(tests_bp))
+    lsim.assign(tests_bp)
     lsim.propagate()
-    exp = tests.copy()
-    lsim.capture(exp)
+    exp_bp = BPArray(tests_bp)
+    lsim.capture(exp_bp)
+    exp = MVArray(exp_bp)
     
     for i in range(8):
         exp_str = exp[i].replace('R', '1').replace('F', '0').replace('P', '0').replace('N', '1')
@@ -122,24 +126,24 @@ def compare_to_logic_sim(wsim):
 
 
 def test_b14(mydir):
-    c = verilog.parse(mydir / 'b14.v.gz', branchforks=True)
-    df = sdf.parse(mydir / 'b14.sdf.gz')
+    c = verilog.load(mydir / 'b14.v.gz', branchforks=True)
+    df = sdf.load(mydir / 'b14.sdf.gz')
     lt = df.annotation(c, pin_index)
     wsim = WaveSim(c, lt, 8)
     compare_to_logic_sim(wsim)
 
 
 def test_b14_strip_forks(mydir):
-    c = verilog.parse(mydir / 'b14.v.gz', branchforks=True)
-    df = sdf.parse(mydir / 'b14.sdf.gz')
+    c = verilog.load(mydir / 'b14.v.gz', branchforks=True)
+    df = sdf.load(mydir / 'b14.sdf.gz')
     lt = df.annotation(c, pin_index)
     wsim = WaveSim(c, lt, 8, strip_forks=True)
     compare_to_logic_sim(wsim)
 
 
 def test_b14_cuda(mydir):
-    c = verilog.parse(mydir / 'b14.v.gz', branchforks=True)
-    df = sdf.parse(mydir / 'b14.sdf.gz')
+    c = verilog.load(mydir / 'b14.v.gz', branchforks=True)
+    df = sdf.load(mydir / 'b14.sdf.gz')
     lt = df.annotation(c, pin_index)
     wsim = WaveSimCuda(c, lt, 8)
     compare_to_logic_sim(wsim)

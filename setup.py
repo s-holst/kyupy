@@ -1,14 +1,13 @@
 from setuptools import setup, find_packages
 
-with open('README.md', 'r') as f:
+with open('README.rst', 'r') as f:
     long_description = f.read()
 
 setup(
     name='kyupy',
-    version='0.0.1',
+    version='0.0.2',
     description='High-performance processing and analysis of non-hierarchical VLSI designs',
     long_description=long_description,
-    long_description_content_type='text/markdown',
     packages=find_packages(where='src'),
     package_dir={'': 'src'},
     url='https://github.com/s-holst/kyupy',
@@ -16,7 +15,7 @@ setup(
     author_email='mail@s-holst.de',
     python_requires='>=3.6',
     install_requires=[
-        'numpy>=1.15.0',
+        'numpy>=1.17.0',
         'lark-parser>=0.8.0'
     ],
     extras_requires={
