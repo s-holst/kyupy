@@ -14,25 +14,25 @@ from . import readtext
 
 
 class BenchTransformer(Transformer):
-    
+
     def __init__(self, name):
         super().__init__()
         self.c = Circuit(name)
-    
+
     def start(self, _): return self.c
-        
+
     def parameters(self, args): return [self.c.get_or_add_fork(name) for name in args]
-        
+
     def interface(self, args): self.c.interface.extend(args[0])
 
     def assignment(self, args):
         name, cell_type, drivers = args
         cell = Node(self.c, str(name), str(cell_type))
         Line(self.c, cell, self.c.get_or_add_fork(str(name)))
-        [Line(self.c, d, cell) for d in drivers]
+        for d in drivers: Line(self.c, d, cell)
 
 
-grammar = r"""
+GRAMMAR = r"""
     start: (statement)*
     statement: input | output | assignment
     input: ("INPUT" | "input") parameters -> interface
@@ -51,7 +51,7 @@ def parse(text, name=None):
     :param name: The name of the circuit. Circuit names are not included in bench descriptions.
     :return: A :class:`Circuit` object.
     """
-    return Lark(grammar, parser="lalr", transformer=BenchTransformer(name)).parse(text)
+    return Lark(GRAMMAR, parser="lalr", transformer=BenchTransformer(name)).parse(text)
 
 
 def load(file, name=None):

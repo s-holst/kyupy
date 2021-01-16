@@ -5,9 +5,10 @@ with open('README.rst', 'r') as f:
 
 setup(
     name='kyupy',
-    version='0.0.2',
+    version='0.0.3',
     description='High-performance processing and analysis of non-hierarchical VLSI designs',
     long_description=long_description,
+    long_description_content_type='text/x-rst',
     packages=find_packages(where='src'),
     package_dir={'': 'src'},
     url='https://github.com/s-holst/kyupy',

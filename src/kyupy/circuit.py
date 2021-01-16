@@ -53,7 +53,7 @@ class Node:
         """
         self.kind = kind
         """A string describing the type of the node.
-        
+
         Common types are the names from a standard cell library or general gate names like 'AND' or 'NOR'.
         If :py:attr:`kind` is set to '__fork__', it receives special treatment.
         A `fork` describes a named signal or a fan-out point in the circuit and not a physical `cell` like a gate.
@@ -74,6 +74,9 @@ class Node:
         self.outs = GrowingList()
         """A list of output connections (:class:`Line` objects).
         """
+
+    def __index__(self):
+        return self.index
 
     def __repr__(self):
         ins = ' '.join([f'<{line.index}' if line is not None else '<None' for line in self.ins])
@@ -130,7 +133,7 @@ class Line:
         """
         self.driver_pin = driver[1]
         """The output pin position of the driver node this line is connected to.
-        
+
         This is the position in the outs-list of the driving node this line referenced from:
         :code:`self.driver.outs[self.driver_pin] == self`.
         """
@@ -160,6 +163,9 @@ class Line:
         self.reader = None
         self.circuit = None
 
+    def __index__(self):
+        return self.index
+
     def __repr__(self):
         return f'{self.index}'
 
@@ -187,17 +193,17 @@ class Circuit:
         """
         self.nodes = IndexList()
         """A list of all :class:`Node` objects contained in the circuit.
-        
+
         The position of a node in this list equals its index :code:`self.nodes[42].index == 42`.
         """
         self.lines = IndexList()
         """A list of all :class:`Line` objects contained in the circuit.
-        
+
         The position of a line in this list equals its index :code:`self.lines[42].index == 42`.
         """
         self.interface = GrowingList()
         """A list of nodes that are designated as primary input- or output-ports.
-        
+
         Port-nodes are contained in :py:attr:`nodes` as well as :py:attr:`interface`.
         The position of a node in the interface list corresponds to positions of logic values in test vectors.
         The port direction is not stored explicitly.
@@ -213,7 +219,7 @@ class Circuit:
 
     def get_or_add_fork(self, name):
         return self.forks[name] if name in self.forks else Node(self, name)
-    
+
     def copy(self):
         """Returns a deep copy of the circuit.
         """
@@ -231,7 +237,7 @@ class Circuit:
                 n = c.cells[node.name]
             c.interface.append(n)
         return c
-    
+
     def dump(self):
         """Returns a string representation of the circuit and all its nodes.
         """
@@ -239,8 +245,9 @@ class Circuit:
         return header + '\n'.join([str(n) for n in self.nodes])
 
     def __repr__(self):
-        name = f" '{self.name}'" if self.name else ''
-        return f'<Circuit{name} with {len(self.nodes)} nodes, {len(self.lines)} lines, {len(self.interface)} ports>'
+        name = f' {self.name}' if self.name else ''
+        return f'<Circuit{name} cells={len(self.cells)} forks={len(self.forks)} ' + \
+               f'lines={len(self.lines)} ports={len(self.interface)}>'
 
     def topological_order(self):
         """Generator function to iterate over all nodes in topological order.
@@ -255,8 +262,8 @@ class Circuit:
             for line in n.outs:
                 if line is None: continue
                 succ = line.reader
-                visit_count[succ.index] += 1
-                if visit_count[succ.index] == len(succ.ins) and 'DFF' not in succ.kind:
+                visit_count[succ] += 1
+                if visit_count[succ] == len(succ.ins) and 'DFF' not in succ.kind:
                     queue.append(succ)
             yield n
 
@@ -280,8 +287,8 @@ class Circuit:
             n = queue.popleft()
             for line in n.ins:
                 pred = line.driver
-                visit_count[pred.index] += 1
-                if visit_count[pred.index] == len(pred.outs) and 'DFF' not in pred.kind:
+                visit_count[pred] += 1
+                if visit_count[pred] == len(pred.outs) and 'DFF' not in pred.kind:
                     queue.append(pred)
             yield n
 
@@ -292,13 +299,13 @@ class Circuit:
         """
         marks = [False] * len(self.nodes)
         for n in origin_nodes:
-            marks[n.index] = True
+            marks[n] = True
         for n in self.reversed_topological_order():
-            if not marks[n.index]:
+            if not marks[n]:
                 for line in n.outs:
                     if line is not None:
-                        marks[n.index] |= marks[line.reader.index]
-            if marks[n.index]:
+                        marks[n] |= marks[line.reader]
+            if marks[n]:
                 yield n
 
     def fanout_free_regions(self):

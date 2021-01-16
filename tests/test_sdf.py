@@ -1,5 +1,4 @@
 from kyupy import sdf, verilog
-from kyupy.saed import pin_index
 
 
 def test_parse():
@@ -81,20 +80,20 @@ def test_b14(mydir):
 def test_gates(mydir):
     c = verilog.load(mydir / 'gates.v')
     df = sdf.load(mydir / 'gates.sdf')
-    lt = df.annotation(c, pin_index, dataset=1)
+    lt = df.annotation(c, dataset=1)
     nand_a = c.cells['nandgate'].ins[0]
     nand_b = c.cells['nandgate'].ins[1]
     and_a = c.cells['andgate'].ins[0]
     and_b = c.cells['andgate'].ins[1]
 
-    assert lt[nand_a.index, 0, 0] == 0.103
-    assert lt[nand_a.index, 0, 1] == 0.127
+    assert lt[nand_a, 0, 0] == 0.103
+    assert lt[nand_a, 0, 1] == 0.127
 
-    assert lt[nand_b.index, 0, 0] == 0.086
-    assert lt[nand_b.index, 0, 1] == 0.104
+    assert lt[nand_b, 0, 0] == 0.086
+    assert lt[nand_b, 0, 1] == 0.104
 
-    assert lt[and_a.index, 0, 0] == 0.378
-    assert lt[and_a.index, 0, 1] == 0.377
+    assert lt[and_a, 0, 0] == 0.378
+    assert lt[and_a, 0, 1] == 0.377
 
-    assert lt[and_b.index, 0, 0] == 0.375
-    assert lt[and_b.index, 0, 1] == 0.370
+    assert lt[and_b, 0, 0] == 0.375
+    assert lt[and_b, 0, 1] == 0.370

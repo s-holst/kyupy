@@ -10,13 +10,13 @@ from lark import Lark, Transformer
 
 from . import readtext
 from .circuit import Circuit, Node, Line
-from .saed import pin_index, pin_is_output
+from .techlib import TechLib
 
 Instantiation = namedtuple('Instantiation', ['type', 'name', 'pins'])
 
 
 class SignalDeclaration:
-    
+
     def __init__(self, kind, tokens):
         self.left = None
         self.right = None
@@ -27,25 +27,25 @@ class SignalDeclaration:
             self.basename = tokens.children[2]
             self.left = int(tokens.children[0].value)
             self.right = int(tokens.children[1].value)
-    
+
     @property
     def names(self):
         if self.left is None:
             return [self.basename]
         if self.left <= self.right:
             return [f'{self.basename}[{i}]' for i in range(self.left, self.right + 1)]
-        else:
-            return [f'{self.basename}[{i}]' for i in range(self.left, self.right - 1, -1)]
-        
+        return [f'{self.basename}[{i}]' for i in range(self.left, self.right - 1, -1)]
+
     def __repr__(self):
         return f"{self.kind}:{self.basename}[{self.left}:{self.right}]"
 
 
 class VerilogTransformer(Transformer):
-    def __init__(self, branchforks=False):
+    def __init__(self, branchforks=False, tlib=TechLib()):
         super().__init__()
         self._signal_declarations = {}
         self.branchforks = branchforks
+        self.tlib = tlib
 
     @staticmethod
     def name(args):
@@ -57,24 +57,24 @@ class VerilogTransformer(Transformer):
     @staticmethod
     def instantiation(args):
         return Instantiation(args[0], args[1],
-                             dict([(pin.children[0], pin.children[1]) for pin in args[2:]]))
-       
+                             dict((pin.children[0], pin.children[1]) for pin in args[2:]))
+
     def input(self, args):
         for sd in [SignalDeclaration('input', signal) for signal in args]:
             self._signal_declarations[sd.basename] = sd
-    
+
     def inout(self, args):
         for sd in [SignalDeclaration('input', signal) for signal in args]:  # just treat as input
             self._signal_declarations[sd.basename] = sd
-    
+
     def output(self, args):
         for sd in [SignalDeclaration('output', signal) for signal in args]:
             self._signal_declarations[sd.basename] = sd
-            
+
     def wire(self, args):
         for sd in [SignalDeclaration('wire', signal) for signal in args]:
             self._signal_declarations[sd.basename] = sd
-                
+
     def module(self, args):
         c = Circuit(args[0])
         positions = {}
@@ -85,11 +85,11 @@ class VerilogTransformer(Transformer):
                 pos += 1
         assignments = []
         for stmt in args[2:]:  # pass 1: instantiate cells and driven signals
-            if type(stmt) is Instantiation:
+            if isinstance(stmt, Instantiation):
                 n = Node(c, stmt.name, kind=stmt.type)
                 for p, s in stmt.pins.items():
-                    if pin_is_output(n.kind, p):
-                        Line(c, (n, pin_index(stmt.type, p)), Node(c, s))
+                    if self.tlib.pin_is_output(n.kind, p):
+                        Line(c, (n, self.tlib.pin_index(stmt.type, p)), Node(c, s))
             elif stmt is not None and stmt.data == 'assign':
                 assignments.append((stmt.children[0], stmt.children[1]))
         for sd in self._signal_declarations.values():
@@ -108,10 +108,10 @@ class VerilogTransformer(Transformer):
                 assert s1 not in c.forks, 'assignment between two driven signals'
                 Line(c, c.forks[s2], Node(c, s1))
         for stmt in args[2:]:  # pass 2: connect signals to readers
-            if type(stmt) is Instantiation:
+            if isinstance(stmt, Instantiation):
                 for p, s in stmt.pins.items():
                     n = c.cells[stmt.name]
-                    if pin_is_output(n.kind, p): continue
+                    if self.tlib.pin_is_output(n.kind, p): continue
                     if s.startswith("1'b"):
                         const = f'__const{s[3]}__'
                         if const not in c.cells:
@@ -121,7 +121,7 @@ class VerilogTransformer(Transformer):
                         branchfork = Node(c, fork.name + "~" + n.name + "/" + p)
                         Line(c, fork, branchfork)
                         fork = branchfork
-                    Line(c, fork, (n, pin_index(stmt.type, p)))
+                    Line(c, fork, (n, self.tlib.pin_index(stmt.type, p)))
         for sd in self._signal_declarations.values():
             if sd.kind == 'output':
                 for name in sd.names:
@@ -129,14 +129,10 @@ class VerilogTransformer(Transformer):
         return c
 
     @staticmethod
-    def start(args):
-        if len(args) == 1:
-            return args[0]
-        else:
-            return args
+    def start(args): return args[0] if len(args) == 1 else args
 
 
-grammar = """
+GRAMMAR = """
     start: (module)*
     module: "module" name parameters ";" (_statement)* "endmodule"
     parameters: "(" [ name ( "," name )* ] ")"
@@ -158,16 +154,18 @@ grammar = """
     """
 
 
-def parse(text, *, branchforks=False):
+def parse(text, *, branchforks=False, tlib=TechLib()):
     """Parses the given ``text`` as Verilog code.
 
     :param text: A string with Verilog code.
     :param branchforks: If set to ``True``, the returned circuit will include additional `forks` on each fanout branch.
         These forks are needed to correctly annotate interconnect delays
         (see :py:func:`kyupy.sdf.DelayFile.annotation`).
+    :param tlib: A technology library object that provides pin name mappings.
+    :type tlib: :py:class:`~kyupy.techlib.TechLib`
     :return: A :class:`~kyupy.circuit.Circuit` object.
     """
-    return Lark(grammar, parser="lalr", transformer=VerilogTransformer(branchforks)).parse(text)
+    return Lark(GRAMMAR, parser="lalr", transformer=VerilogTransformer(branchforks, tlib)).parse(text)
 
 
 def load(file, *args, **kwargs):

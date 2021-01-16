@@ -4,9 +4,9 @@ from kyupy import bench
 def test_b01(mydir):
     with open(mydir / 'b01.bench', 'r') as f:
         c = bench.parse(f.read())
-        assert 92 == len(c.nodes)
+        assert len(c.nodes) == 92
     c = bench.load(mydir / 'b01.bench')
-    assert 92 == len(c.nodes)
+    assert len(c.nodes) == 92
 
 
 def test_simple():

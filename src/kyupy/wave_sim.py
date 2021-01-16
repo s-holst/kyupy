@@ -1,10 +1,10 @@
-"""High-Throughput combinational logic timing simulators.
+"""High-throughput combinational logic timing simulators.
 
-These simulators work similarly to :py:class:`kyupy.logic_sim.LogicSim`.
+These simulators work similarly to :py:class:`~kyupy.logic_sim.LogicSim`.
 They propagate values through the combinational circuit from (pseudo) primary inputs to (pseudo) primary outputs.
 Instead of propagating logic values, these simulators propagate signal histories (waveforms).
-They are designed to run many simulations in parallel and while their latencies are quite high, they achieve
-high throughput performance.
+They are designed to run many simulations in parallel and while their latencies are quite high, they can achieve
+high throughput.
 
 The simulators are not event-based and are not capable of simulating sequential circuits directly.
 
@@ -17,13 +17,16 @@ from bisect import bisect, insort_left
 
 import numpy as np
 
-from . import numba
-from . import cuda
+from . import numba, cuda, hr_bytes
 
 
-TMAX = np.float32(2 ** 127)  # almost np.PINF for 32-bit floating point values
-TMAX_OVL = np.float32(1.1 * 2 ** 127)  # almost np.PINF with overflow mark
-TMIN = np.float32(-2 ** 127)  # almost np.NINF for 32-bit floating point values
+TMAX = np.float32(2 ** 127)
+"""A large 32-bit floating point value used to mark the end of a waveform."""
+TMAX_OVL = np.float32(1.1 * 2 ** 127)
+"""A large 32-bit floating point value used to mark the end of a waveform that
+may be incomplete due to an overflow."""
+TMIN = np.float32(-2 ** 127)
+"""A large negative 32-bit floating point value used at the beginning of waveforms that start with logic-1."""
 
 
 class Heap:
@@ -38,7 +41,7 @@ class Heap:
             if self.chunks[loc] == size:
                 del self.released[idx]
                 return loc
-            elif self.chunks[loc] > size:  # split chunk
+            if self.chunks[loc] > size:  # split chunk
                 chunksize = self.chunks[loc]
                 self.chunks[loc] = size
                 self.chunks[loc + size] = chunksize - size
@@ -93,7 +96,23 @@ class Heap:
 
 
 class WaveSim:
-    """A waveform-based combinational logic timing simulator."""
+    """A waveform-based combinational logic timing simulator running on CPU.
+
+    :param circuit: The circuit to simulate.
+    :param timing: The timing annotation of the circuit (see :py:func:`kyupy.sdf.DelayFile.annotation` for details)
+    :param sims: The number of parallel simulations.
+    :param wavecaps: The number of floats available in each waveform. Waveforms are encoding the signal switching
+        history by storing transition times. The waveform capacity roughly corresponds to the number of transitions
+        that can be stored. A capacity of ``n`` can store at least ``n-2`` transitions. If more transitions are
+        generated during simulation, the latest glitch is removed (freeing up two transition times) and an overflow
+        flag is set. If an integer is given, all waveforms are set to that same capacity. With an array of length
+        ``len(circuit.lines)`` the capacity can be controlled for each intermediate waveform individually.
+    :param strip_forks: If enabled, the simulator will not evaluate fork nodes explicitly. This saves simulation time
+        by reducing the number of nodes to simulate, but (interconnect) delay annotations of lines read by fork nodes
+        are ignored.
+    :param keep_waveforms: If disabled, memory of intermediate signal waveforms will be re-used. This greatly reduces
+        memory footprint, but intermediate signal waveforms become unaccessible after a propagation.
+    """
     def __init__(self, circuit, timing, sims=8, wavecaps=16, strip_forks=False, keep_waveforms=True):
         self.circuit = circuit
         self.sims = sims
@@ -104,7 +123,7 @@ class WaveSim:
 
         self.cdata = np.zeros((len(self.interface), sims, 7), dtype='float32')
 
-        if type(wavecaps) is int:
+        if isinstance(wavecaps, int):
             wavecaps = [wavecaps] * len(circuit.lines)
 
         intf_wavecap = 4  # sufficient for storing only 1 transition.
@@ -118,7 +137,7 @@ class WaveSim:
 
         # translate circuit structure into self.ops
         ops = []
-        interface_dict = dict([(n, i) for i, n in enumerate(self.interface)])
+        interface_dict = dict((n, i) for i, n in enumerate(self.interface))
         for n in circuit.topological_order():
             if n in interface_dict:
                 inp_idx = self.ppi_offset + interface_dict[n]
@@ -152,7 +171,7 @@ class WaveSim:
                     ops.append((0b0110, o0_idx, i0_idx, i1_idx))
                 elif kind.startswith('xnor'):
                     ops.append((0b1001, o0_idx, i0_idx, i1_idx))
-                elif kind.startswith('not') or kind.startswith('inv'):
+                elif kind.startswith('not') or kind.startswith('inv') or kind.startswith('ibuf'):
                     ops.append((0b0101, o0_idx, i0_idx, i1_idx))
                 elif kind.startswith('buf') or kind.startswith('nbuf'):
                     ops.append((0b1010, o0_idx, i0_idx, i1_idx))
@@ -173,7 +192,7 @@ class WaveSim:
                     prev_line = prev_line.driver.ins[0]
                 stem_idx = prev_line.index
                 for ol in f.outs:
-                    stems[ol.index] = stem_idx
+                    stems[ol] = stem_idx
 
         # calculate level (distance from PI/PPI) and reference count for each line
         levels = np.zeros(self.sat_length, dtype='int32')
@@ -211,7 +230,7 @@ class WaveSim:
                 self.sat[self.ppi_offset + i] = h.alloc(intf_wavecap), intf_wavecap, 0
                 ref_count[self.ppi_offset + i] += 1
             if len(n.ins) > 0:
-                i0_idx = stems[n.ins[0].index] if stems[n.ins[0].index] >= 0 else n.ins[0].index
+                i0_idx = stems[n.ins[0]] if stems[n.ins[0]] >= 0 else n.ins[0]
                 ref_count[i0_idx] += 1
 
         # allocate memory for the rest of the circuit
@@ -240,7 +259,7 @@ class WaveSim:
         # copy memory location to PO/PPO area
         for i, n in enumerate(self.interface):
             if len(n.ins) > 0:
-                self.sat[self.ppo_offset + i] = self.sat[n.ins[0].index]
+                self.sat[self.ppo_offset + i] = self.sat[n.ins[0]]
 
         # pad timing
         self.timing = np.zeros((self.sat_length, 2, 2))
@@ -253,15 +272,32 @@ class WaveSim:
         m0 = ~m1
         self.mask = np.rollaxis(np.vstack((m0, m1)), 1)
 
+    def __repr__(self):
+        total_mem = self.state.nbytes + self.sat.nbytes + self.ops.nbytes + self.cdata.nbytes
+        return f'<WaveSim {self.circuit.name} sims={self.sims} ops={len(self.ops)} ' + \
+               f'levels={len(self.level_starts)} mem={hr_bytes(total_mem)}>'
+
     def get_line_delay(self, line, polarity):
+        """Returns the current delay of the given ``line`` and ``polarity`` in the simulation model."""
         return self.timing[line, 0, polarity]
 
     def set_line_delay(self, line, polarity, delay):
+        """Sets a new ``delay`` for the given ``line`` and ``polarity`` in the simulation model."""
         self.timing[line, 0, polarity] = delay
 
     def assign(self, vectors, time=0.0, offset=0):
+        """Assigns new values to the primary inputs and state-elements.
+
+        :param vectors: The values to assign preferably in 8-valued logic. The values are converted to
+            appropriate waveforms with or one transition (``RISE``, ``FALL``) no transitions
+            (``ZERO``, ``ONE``, and others).
+        :type vectors: :py:class:`~kyupy.logic.BPArray`
+        :param time: The transition time of the generated waveforms.
+        :param offset: The offset into the vector set. The vector assigned to the first simulator is
+            ``vectors[offset]``.
+        """
         nvectors = min(len(vectors) - offset, self.sims)
-        for i, node in enumerate(self.interface):
+        for i in range(len(self.interface)):
             ppi_loc = self.sat[self.ppi_offset + i, 0]
             if ppi_loc < 0: continue
             for p in range(nvectors):
@@ -283,16 +319,21 @@ class WaveSim:
                 self.state[ppi_loc + toggle, p] = TMAX
 
     def propagate(self, sims=None, sd=0.0, seed=1):
-        if sims is None:
-            sims = self.sims
-        else:
-            sims = min(sims, self.sims)
+        """Propagates all waveforms from the (pseudo) primary inputs to the (pseudo) primary outputs.
+
+        :param sims: Number of parallel simulations to execute. If None, all available simulations are performed.
+        :param sd: Standard deviation for injection of random delay variation. Active, if value is positive.
+        :param seed: Random seed for delay variations.
+        """
+        sims = min(sims or self.sims, self.sims)
         for op_start, op_stop in zip(self.level_starts, self.level_stops):
             self.overflows += level_eval(self.ops, op_start, op_stop, self.state, self.sat, 0, sims,
                                          self.timing, sd, seed)
         self.lst_eat_valid = False
 
     def wave(self, line, vector):
+        # """Returns the desired waveform from the simulation state. Only valid, if simulator was
+        # instantiated with ``keep_waveforms=True``."""
         if line < 0:
             return [TMAX]
         mem, wcap, _ = self.sat[line]
@@ -306,7 +347,34 @@ class WaveSim:
     def wave_ppo(self, o, vector):
         return self.wave(self.ppo_offset + o, vector)
 
-    def capture(self, time=TMAX, sd=0, seed=1, cdata=None, offset=0):
+    def capture(self, time=TMAX, sd=0.0, seed=1, cdata=None, offset=0):
+        """Simulates a capture operation at all state-elements and primary outputs.
+
+        The capture analyzes the propagated waveforms at and around the given capture time and returns
+        various results for each capture operation.
+
+        :param time: The desired capture time. By default, a capture of the settled value is performed.
+        :param sd: A standard deviation for uncertainty in the actual capture time.
+        :param seed: The random seed for a capture with uncertainty.
+        :param cdata: An array to copy capture data into (optional). See the return value for details.
+        :param offset: An offset into the supplied capture data array.
+        :return: The capture data as numpy array.
+
+            The 3-dimensional capture data array contains for each interface node (axis 0),
+            and each test (axis 1), seven values:
+
+            0. Probability of capturing a 1 at the given capture time (same as next value, if no
+               standard deviation given).
+            1. A capture value decided by random sampling according to above probability and given seed.
+            2. The final value (assume a very late capture time).
+            3. True, if there was a premature capture (capture error), i.e. final value is different
+               from captured value.
+            4. Earliest arrival time. The time at which the output transitioned from its initial value.
+            5. Latest stabilization time. The time at which the output transitioned to its final value.
+            6. Overflow indicator. If non-zero, some signals in the input cone of this output had more
+               transitions than specified in ``wavecaps``. Some transitions have been discarded, the
+               final values in the waveforms are still valid.
+        """
         for i, node in enumerate(self.interface):
             if len(node.ins) == 0: continue
             for p in range(self.sims):
@@ -319,7 +387,15 @@ class WaveSim:
         return self.cdata
 
     def reassign(self, time=0.0):
-        for i, node in enumerate(self.interface):
+        """Re-assigns the last capture to the appropriate pseudo-primary inputs. Generates a new set of
+        waveforms at the PPIs that start with the previous final value of that PPI, and transitions at the
+        given time to the value captured in a previous simulation. :py:func:`~WaveSim.capture` must be called
+        prior to this function. The final value of each PPI is taken from the randomly sampled concrete logic
+        values in the capture data.
+
+        :param time: The transition time at the inputs (usually 0.0).
+        """
+        for i in range(len(self.interface)):
             ppi_loc = self.sat[self.ppi_offset + i, 0]
             ppo_loc = self.sat[self.ppo_offset + i, 0]
             if ppi_loc < 0 or ppo_loc < 0: continue
@@ -384,8 +460,7 @@ class WaveSim:
                 accs[idx] += 1
         if s_sqrt2 == 0:
             return values
-        else:
-            return accs
+        return accs
 
     def vals(self, line, vector, times, sd=0):
         return self._vals(line, vector, times, sd)
@@ -462,7 +537,7 @@ def rand_gauss(seed, sd):
         return 1.0
     while True:
         x = -6.0
-        for i in range(12):
+        for _ in range(12):
             seed = int(0xDEECE66D) * seed + 0xB
             x += float((seed >> 8) & 0xffffff) / float(1 << 24)
         x *= sd
@@ -539,12 +614,17 @@ def wave_eval(op, state, sat, st_idx, line_times, sd=0.0, seed=0):
         state[z_mem + z_cur, st_idx] = TMAX_OVL
     else:
         state[z_mem + z_cur, st_idx] = a if a > b else b  # propagate overflow flags by storing biggest TMAX from input
-        
+
     return overflows
 
 
 class WaveSimCuda(WaveSim):
-    """A GPU-accelerated waveform-based combinational logic timing simulator."""
+    """A GPU-accelerated waveform-based combinational logic timing simulator.
+
+    The API is the same as for :py:class:`WaveSim`.
+    All internal memories are mirrored into GPU memory upon construction.
+    Some operations like access to single waveforms can involve large communication overheads.
+    """
     def __init__(self, circuit, timing, sims=8, wavecaps=16, strip_forks=False, keep_waveforms=True):
         super().__init__(circuit, timing, sims, wavecaps, strip_forks, keep_waveforms)
 
@@ -558,6 +638,12 @@ class WaveSimCuda(WaveSim):
         self.d_cdata = cuda.to_device(self.cdata)
 
         self._block_dim = (32, 16)
+
+    def __repr__(self):
+        total_mem = self.state.nbytes + self.sat.nbytes + self.ops.nbytes + self.timing.nbytes + \
+                    self.tdata.nbytes + self.cdata.nbytes
+        return f'<WaveSimCuda {self.circuit.name} sims={self.sims} ops={len(self.ops)} ' + \
+               f'levels={len(self.level_starts)} mem={hr_bytes(total_mem)}>'
 
     def get_line_delay(self, line, polarity):
         return self.d_timing[line, 0, polarity]
@@ -586,10 +672,7 @@ class WaveSimCuda(WaveSim):
         return gx, gy
 
     def propagate(self, sims=None, sd=0.0, seed=1):
-        if sims is None:
-            sims = self.sims
-        else:
-            sims = min(sims, self.sims)
+        sims = min(sims or self.sims, self.sims)
         for op_start, op_stop in zip(self.level_starts, self.level_stops):
             grid_dim = self._grid_dim(sims, op_stop - op_start)
             wave_kernel[grid_dim, self._block_dim](self.d_ops, op_start, op_stop, self.d_state, self.sat, int(0),
@@ -599,10 +682,10 @@ class WaveSimCuda(WaveSim):
 
     def wave(self, line, vector):
         if line < 0:
-            return None
+            return [TMAX]
         mem, wcap, _ = self.sat[line]
         if mem < 0:
-            return None
+            return [TMAX]
         return self.d_state[mem:mem + wcap, vector]
 
     def capture(self, time=TMAX, sd=0, seed=1, cdata=None, offset=0):
@@ -655,7 +738,7 @@ def reassign_kernel(state, sat, ppi_offset, ppo_offset, cdata, ppi_time):
     if vector >= state.shape[-1]: return
     if ppo_offset + y >= len(sat): return
 
-    ppo, ppo_cap, _ = sat[ppo_offset + y]
+    ppo, _, _ = sat[ppo_offset + y]
     ppi, ppi_cap, _ = sat[ppi_offset + y]
     if ppo < 0: return
     if ppi < 0: return
@@ -765,7 +848,7 @@ def rand_gauss_dev(seed, sd):
         return 1.0
     while True:
         x = -6.0
-        for i in range(12):
+        for _ in range(12):
             seed = int(0xDEECE66D) * seed + 0xB
             x += float((seed >> 8) & 0xffffff) / float(1 << 24)
         x *= sd

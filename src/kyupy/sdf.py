@@ -14,6 +14,7 @@ import numpy as np
 from lark import Lark, Transformer
 
 from . import log, readtext
+from .techlib import TechLib
 
 
 Interconnect = namedtuple('Interconnect', ['orig', 'dest', 'r', 'f'])
@@ -35,7 +36,7 @@ class DelayFile:
         return '\n'.join(f'{n}: {l}' for n, l in self.cells.items()) + '\n' + \
                '\n'.join(str(i) for i in self.interconnects)
 
-    def annotation(self, circuit, pin_index_f, dataset=1, interconnect=True, ffdelays=True):
+    def annotation(self, circuit, tlib=TechLib(), dataset=1, interconnect=True, ffdelays=True):
         """Constructs an 3-dimensional ndarray with timing data for each line in ``circuit``.
 
         An IOPATH delay for a node is annotated to the line connected to the input pin specified in the IOPATH.
@@ -43,29 +44,36 @@ class DelayFile:
         Currently, only ABSOLUTE IOPATH and INTERCONNECT delays are supported.
         Pulse rejection limits are derived from absolute delays, explicit declarations (PATHPULSE etc.) are ignored.
 
-        :param circuit:
-        :param pin_index_f:
-        :param ffdelays:
-        :param interconnect:
-        :type dataset: int or tuple
+        :param circuit: The circuit to annotate. Names from the STIL file are matched to the node names.
+        :type circuit: :class:`~kyupy.circuit.Circuit`
+        :param tlib: A technology library object that provides pin name mappings.
+        :type tlib: :py:class:`~kyupy.techlib.TechLib`
+        :param dataset: SDFs store multiple values for each delay (e.g. minimum, typical, maximum).
+            An integer selects the dataset to use (default is 1 for 'typical').
+            If a tuple is given, the annotator will calculate the average of multiple datasets.
+        :type dataset: ``int`` or ``tuple``
+        :param interconnect: Whether or not to include the delays of interconnects in the annotation.
+            To properly annotate interconnect delays, the circuit model has to include a '__fork__' node on
+            every signal and every fanout-branch. The Verilog parser aids in this by setting the parameter
+            `branchforks=True` in :py:func:`kyupy.verilog.parse`.
+        :type interconnect: ``bool``
+        :param ffdelays: Whether or not to include the delays of flip-flops in the annotation.
+        :type ffdelays: ``bool``
         :return: A 3-dimensional ndarray with timing data.
 
             * Axis 0: line index.
-            * Axis 1: type of timing data: 0=`delay`, 1=`pulse rejection limit`.
-            * Axis 2: The polarity of the output transition of the reading node: 0=`rising`, 1=`falling`.
+            * Axis 1: type of timing data: 0='delay', 1='pulse rejection limit'.
+            * Axis 2: The polarity of the output transition of the reading node: 0='rising', 1='falling'.
 
             The polarity for pulse rejection is determined by the latter transition of the pulse.
-            E.g., timing[42,1,0] is the rejection limit of a negative pulse at the output of the reader of line 42.
+            E.g., ``timing[42, 1, 0]`` is the rejection limit of a negative pulse at the output
+            of the reader of line 42.
         """
         def select_del(_delvals, idx):
-            if type(dataset) is tuple:
-                s = 0
-                for d in dataset:
-                    s += _delvals[idx][d]
-                return s / len(dataset)
-            else:
-                return _delvals[idx][dataset]
-        
+            if isinstance(dataset, tuple):
+                return sum(_delvals[idx][d] for d in dataset) / len(dataset)
+            return _delvals[idx][dataset]
+
         def find_cell(name):
             if name not in circuit.cells:
                 name = name.replace('\\', '')
@@ -74,7 +82,7 @@ class DelayFile:
             if name not in circuit.cells:
                 return None
             return circuit.cells[name]
-        
+
         timing = np.zeros((len(circuit.lines), 2, 2))
         for cn, iopaths in self.cells.items():
             for ipn, opn, *delvals in iopaths:
@@ -85,17 +93,17 @@ class DelayFile:
                 if cell is None:
                     log.warn(f'Cell from SDF not found in circuit: {cn}')
                     continue
-                ipin = pin_index_f(cell.kind, ipn)
-                opin = pin_index_f(cell.kind, opn)
+                ipin = tlib.pin_index(cell.kind, ipn)
+                opin = tlib.pin_index(cell.kind, opn)
                 kind = cell.kind.lower()
 
                 ipn2 = ipn.replace('(posedge A1)', 'A1').replace('(negedge A1)', 'A1')\
                     .replace('(posedge A2)', 'A2').replace('(negedge A2)', 'A2')
-                
+
                 def add_delays(_line):
                     if _line is not None:
-                        timing[_line.index, :, 0] += select_del(delvals, 0)
-                        timing[_line.index, :, 1] += select_del(delvals, 1)
+                        timing[_line, :, 0] += select_del(delvals, 0)
+                        timing[_line, :, 1] += select_del(delvals, 1)
 
                 take_avg = False
                 if kind.startswith('sdff'):
@@ -105,16 +113,16 @@ class DelayFile:
                         add_delays(cell.outs[opin])
                 else:
                     if kind.startswith(('xor', 'xnor')):
-                        ipin = pin_index_f(cell.kind, ipn2)
-                        # print(ipn, ipin, times[cell.i_lines[ipin].index, 0, 0])
-                        take_avg = timing[cell.ins[ipin].index].sum() > 0
+                        ipin = tlib.pin_index(cell.kind, ipn2)
+                        # print(ipn, ipin, times[cell.i_lines[ipin], 0, 0])
+                        take_avg = timing[cell.ins[ipin]].sum() > 0
                     add_delays(cell.ins[ipin])
                     if take_avg:
-                        timing[cell.ins[ipin].index] /= 2
-        
+                        timing[cell.ins[ipin]] /= 2
+
         if not interconnect or self.interconnects is None:
             return timing
-        
+
         for n1, n2, *delvals in self.interconnects:
             delvals = [d if len(d) > 0 else [0, 0, 0] for d in delvals]
             if max(max(delvals)) == 0:
@@ -139,7 +147,7 @@ class DelayFile:
             if c2 is None:
                 log.warn(f'Cell from SDF not found in circuit: {cn2}')
                 continue
-            p1, p2 = pin_index_f(c1.kind, pn1), pin_index_f(c2.kind, pn2)
+            p1, p2 = tlib.pin_index(c1.kind, pn1), tlib.pin_index(c2.kind, pn2)
             line = None
             f1, f2 = c1.outs[p1].reader, c2.ins[p2].driver
             if f1 != f2:  # possible branchfork
@@ -149,8 +157,8 @@ class DelayFile:
             elif len(f2.outs) == 1:  # no fanout?
                 line = f2.ins[0]
             if line is not None:
-                timing[line.index, :, 0] += select_del(delvals, 0)
-                timing[line.index, :, 1] += select_del(delvals, 1)
+                timing[line, :, 0] += select_del(delvals, 0)
+                timing[line, :, 1] += select_del(delvals, 1)
             else:
                 log.warn(f'No branchfork for annotating interconnect delay {c1.name}/{p1}->{c2.name}/{p2}')
         return timing
@@ -184,7 +192,7 @@ class SdfTransformer(Transformer):
         return DelayFile(name, cells)
 
 
-grammar = r"""
+GRAMMAR = r"""
     start: "(DELAYFILE" ( "(SDFVERSION" _NOB ")"
         | "(DESIGN" "\"" NAME "\"" ")"
         | "(DATE" _NOB ")"
@@ -218,7 +226,7 @@ grammar = r"""
 
 def parse(text):
     """Parses the given ``text`` and returns a :class:`DelayFile` object."""
-    return Lark(grammar, parser="lalr", transformer=SdfTransformer()).parse(text)
+    return Lark(GRAMMAR, parser="lalr", transformer=SdfTransformer()).parse(text)
 
 
 def load(file):

@@ -25,7 +25,7 @@ from collections.abc import Iterable
 
 import numpy as np
 
-from . import numba
+from . import numba, hr_bytes
 
 
 ZERO = 0b000
@@ -58,6 +58,12 @@ on a signal. ``'N'``, ``'n'``, and ``'v'`` are interpreted as ``NPULSE``.
 
 
 def interpret(value):
+    """Converts characters, strings, and lists of them to lists of logic constants defined above.
+
+    :param value: A character (string of length 1), Boolean, Integer, None, or Iterable.
+        Iterables (such as strings) are traversed and their individual characters are interpreted.
+    :return: A logic constant or a (possibly multi-dimensional) list of logic constants.
+    """
     if isinstance(value, Iterable) and not (isinstance(value, str) and len(value) == 1):
         return list(map(interpret, value))
     if value in [0, '0', False, 'L', 'l']:
@@ -85,129 +91,21 @@ def bit_in(a, pos):
     return a[pos >> 3] & _bit_in_lut[pos & 7]
 
 
-def mv_cast(*args, m=8):
-    return [a if isinstance(a, MVArray) else MVArray(a, m=m) for a in args]
-
-
-def mv_getm(*args):
-    return max([a.m for a in args if isinstance(a, MVArray)] + [0]) or 8
-
-
-def _mv_not(m, out, inp):
-    np.bitwise_xor(inp, 0b11, out=out)  # this also exchanges UNASSIGNED <-> UNKNOWN
-    if m > 2:
-        np.putmask(out, (inp == UNKNOWN), UNKNOWN)  # restore UNKNOWN
-
-
-def mv_not(x1, out=None):
-    m = mv_getm(x1)
-    x1 = mv_cast(x1, m=m)[0]
-    out = out or MVArray(x1.data.shape, m=m)
-    _mv_not(m, out.data, x1.data)
-    return out
-
-
-def _mv_or(m, out, *ins):
-    if m > 2:
-        any_unknown = (ins[0] == UNKNOWN) | (ins[0] == UNASSIGNED)
-        for inp in ins[1:]: any_unknown |= (inp == UNKNOWN) | (inp == UNASSIGNED)
-        any_one = (ins[0] == ONE)
-        for inp in ins[1:]: any_one |= (inp == ONE)
-
-        out[...] = ZERO
-        np.putmask(out, any_one, ONE)
-        for inp in ins:
-            np.bitwise_or(out, inp, out=out, where=~any_one)
-        np.putmask(out, (any_unknown & ~any_one), UNKNOWN)
-    else:
-        out[...] = ZERO
-        for inp in ins: np.bitwise_or(out, inp, out=out)
-
-
-def mv_or(x1, x2, out=None):
-    m = mv_getm(x1, x2)
-    x1, x2 = mv_cast(x1, x2, m=m)
-    out = out or MVArray(np.broadcast(x1.data, x2.data).shape, m=m)
-    _mv_or(m, out.data, x1.data, x2.data)
-    return out
-
-
-def _mv_and(m, out, *ins):
-    if m > 2:
-        any_unknown = (ins[0] == UNKNOWN) | (ins[0] == UNASSIGNED)
-        for inp in ins[1:]: any_unknown |= (inp == UNKNOWN) | (inp == UNASSIGNED)
-        any_zero = (ins[0] == ZERO)
-        for inp in ins[1:]: any_zero |= (inp == ZERO)
-
-        out[...] = ONE
-        np.putmask(out, any_zero, ZERO)
-        for inp in ins:
-            np.bitwise_and(out, inp | 0b100, out=out, where=~any_zero)
-            if m > 4: np.bitwise_or(out, inp & 0b100, out=out, where=~any_zero)
-        np.putmask(out, (any_unknown & ~any_zero), UNKNOWN)
-    else:
-        out[...] = ONE
-        for inp in ins: np.bitwise_and(out, inp, out=out)
-
-
-def mv_and(x1, x2, out=None):
-    m = mv_getm(x1, x2)
-    x1, x2 = mv_cast(x1, x2, m=m)
-    out = out or MVArray(np.broadcast(x1.data, x2.data).shape, m=m)
-    _mv_and(m, out.data, x1.data, x2.data)
-    return out
-
-
-def _mv_xor(m, out, *ins):
-    if m > 2:
-        any_unknown = (ins[0] == UNKNOWN) | (ins[0] == UNASSIGNED)
-        for inp in ins[1:]: any_unknown |= (inp == UNKNOWN) | (inp == UNASSIGNED)
-
-        out[...] = ZERO
-        for inp in ins:
-            np.bitwise_xor(out, inp & 0b011, out=out)
-            if m > 4: np.bitwise_or(out, inp & 0b100, out=out)
-        np.putmask(out, any_unknown, UNKNOWN)
-    else:
-        out[...] = ZERO
-        for inp in ins: np.bitwise_xor(out, inp, out=out)
-
-
-def mv_xor(x1, x2, out=None):
-    m = mv_getm(x1, x2)
-    x1, x2 = mv_cast(x1, x2, m=m)
-    out = out or MVArray(np.broadcast(x1.data, x2.data).shape, m=m)
-    _mv_xor(m, out.data, x1.data, x2.data)
-    return out
-
-
-def mv_transition(init, final, out=None):
-    m = mv_getm(init, final)
-    init, final = mv_cast(init, final, m=m)
-    init = init.data
-    final = final.data
-    out = out or MVArray(np.broadcast(init, final).shape, m=8)
-    out.data[...] = (init & 0b010) | (final & 0b001)
-    out.data[...] |= ((out.data << 1) ^ (out.data << 2)) & 0b100
-    unknown = (init == UNKNOWN) | (init == UNASSIGNED) | (final == UNKNOWN) | (final == UNASSIGNED)
-    unassigned = (init == UNASSIGNED) & (final == UNASSIGNED)
-    np.putmask(out.data, unknown, UNKNOWN)
-    np.putmask(out.data, unassigned, UNASSIGNED)
-    return out
-
-
 class MVArray:
     """An n-dimensional array of m-valued logic values.
 
     This class wraps a numpy.ndarray of type uint8 and adds support for encoding and
     interpreting 2-valued, 4-valued, and 8-valued logic values.
-    Each logic value is stored as an uint8, value manipulations are cheaper than in BPArray.
+    Each logic value is stored as an uint8, manipulations of individual values are cheaper than in
+    :py:class:`BPArray`.
 
-    An MVArray always has 2 axes:
-
-    * Axis 0 is PI/PO/FF position, the length of this axis is called "width".
-    * Axis 1 is vector/pattern, the length of this axis is called "length".
-
+    :param a: If a tuple is given, it is interpreted as desired shape. To make an array of ``n`` vectors
+        compatible with a simulator ``sim``, use ``(len(sim.interface), n)``. If a :py:class:`BPArray` or
+        :py:class:`MVArray` is given, a deep copy is made. If a string, a list of strings, a list of characters,
+        or a list of lists of characters are given, the data is interpreted best-effort and the array is
+        initialized accordingly.
+    :param m: The arity of the logic. Can be set to 2, 4, or 8. If None is given, the arity of a given
+        :py:class:`BPArray` or :py:class:`MVArray` is used, or, if the array is initialized differently, 8 is used.
     """
 
     def __init__(self, a, m=None):
@@ -217,6 +115,11 @@ class MVArray:
         # Try our best to interpret given a.
         if isinstance(a, MVArray):
             self.data = a.data.copy()
+            """The wrapped 2-dimensional ndarray of logic values.
+
+            * Axis 0 is PI/PO/FF position, the length of this axis is called "width".
+            * Axis 1 is vector/pattern, the length of this axis is called "length".
+            """
             self.m = m or a.m
         elif hasattr(a, 'data'):  # assume it is a BPArray. Can't use isinstance() because BPArray isn't declared yet.
             self.data = np.zeros((a.width, a.length), dtype=np.uint8)
@@ -247,14 +150,212 @@ class MVArray:
         self.width = self.data.shape[-2]
 
     def __repr__(self):
-        return f'<MVArray length={self.length} width={self.width} m={self.m} nbytes={self.data.nbytes}>'
+        return f'<MVArray length={self.length} width={self.width} m={self.m} mem={hr_bytes(self.data.nbytes)}>'
 
     def __str__(self):
         return str([self[idx] for idx in range(self.length)])
 
     def __getitem__(self, vector_idx):
+        """Returns a string representing the desired vector."""
         chars = ["0", "X", "-", "1", "P", "R", "F", "N"]
         return ''.join(chars[v] for v in self.data[:, vector_idx])
+
+    def __len__(self):
+        return self.length
+
+
+def mv_cast(*args, m=8):
+    return [a if isinstance(a, MVArray) else MVArray(a, m=m) for a in args]
+
+
+def mv_getm(*args):
+    return max([a.m for a in args if isinstance(a, MVArray)] + [0]) or 8
+
+
+def _mv_not(m, out, inp):
+    np.bitwise_xor(inp, 0b11, out=out)  # this also exchanges UNASSIGNED <-> UNKNOWN
+    if m > 2:
+        np.putmask(out, (inp == UNKNOWN), UNKNOWN)  # restore UNKNOWN
+
+
+def mv_not(x1, out=None):
+    """A multi-valued NOT operator.
+
+    :param x1: An :py:class:`MVArray` or data the :py:class:`MVArray` constructor accepts.
+    :param out: Optionally an :py:class:`MVArray` as storage destination. If None, a new :py:class:`MVArray`
+        is returned.
+    :return: An :py:class:`MVArray` with the result.
+    """
+    m = mv_getm(x1)
+    x1 = mv_cast(x1, m=m)[0]
+    out = out or MVArray(x1.data.shape, m=m)
+    _mv_not(m, out.data, x1.data)
+    return out
+
+
+def _mv_or(m, out, *ins):
+    if m > 2:
+        any_unknown = (ins[0] == UNKNOWN) | (ins[0] == UNASSIGNED)
+        for inp in ins[1:]: any_unknown |= (inp == UNKNOWN) | (inp == UNASSIGNED)
+        any_one = (ins[0] == ONE)
+        for inp in ins[1:]: any_one |= (inp == ONE)
+
+        out[...] = ZERO
+        np.putmask(out, any_one, ONE)
+        for inp in ins:
+            np.bitwise_or(out, inp, out=out, where=~any_one)
+        np.putmask(out, (any_unknown & ~any_one), UNKNOWN)
+    else:
+        out[...] = ZERO
+        for inp in ins: np.bitwise_or(out, inp, out=out)
+
+
+def mv_or(x1, x2, out=None):
+    """A multi-valued OR operator.
+
+    :param x1: An :py:class:`MVArray` or data the :py:class:`MVArray` constructor accepts.
+    :param x2: An :py:class:`MVArray` or data the :py:class:`MVArray` constructor accepts.
+    :param out: Optionally an :py:class:`MVArray` as storage destination. If None, a new :py:class:`MVArray`
+        is returned.
+    :return: An :py:class:`MVArray` with the result.
+    """
+    m = mv_getm(x1, x2)
+    x1, x2 = mv_cast(x1, x2, m=m)
+    out = out or MVArray(np.broadcast(x1.data, x2.data).shape, m=m)
+    _mv_or(m, out.data, x1.data, x2.data)
+    return out
+
+
+def _mv_and(m, out, *ins):
+    if m > 2:
+        any_unknown = (ins[0] == UNKNOWN) | (ins[0] == UNASSIGNED)
+        for inp in ins[1:]: any_unknown |= (inp == UNKNOWN) | (inp == UNASSIGNED)
+        any_zero = (ins[0] == ZERO)
+        for inp in ins[1:]: any_zero |= (inp == ZERO)
+
+        out[...] = ONE
+        np.putmask(out, any_zero, ZERO)
+        for inp in ins:
+            np.bitwise_and(out, inp | 0b100, out=out, where=~any_zero)
+            if m > 4: np.bitwise_or(out, inp & 0b100, out=out, where=~any_zero)
+        np.putmask(out, (any_unknown & ~any_zero), UNKNOWN)
+    else:
+        out[...] = ONE
+        for inp in ins: np.bitwise_and(out, inp, out=out)
+
+
+def mv_and(x1, x2, out=None):
+    """A multi-valued AND operator.
+
+    :param x1: An :py:class:`MVArray` or data the :py:class:`MVArray` constructor accepts.
+    :param x2: An :py:class:`MVArray` or data the :py:class:`MVArray` constructor accepts.
+    :param out: Optionally an :py:class:`MVArray` as storage destination. If None, a new :py:class:`MVArray`
+        is returned.
+    :return: An :py:class:`MVArray` with the result.
+    """
+    m = mv_getm(x1, x2)
+    x1, x2 = mv_cast(x1, x2, m=m)
+    out = out or MVArray(np.broadcast(x1.data, x2.data).shape, m=m)
+    _mv_and(m, out.data, x1.data, x2.data)
+    return out
+
+
+def _mv_xor(m, out, *ins):
+    if m > 2:
+        any_unknown = (ins[0] == UNKNOWN) | (ins[0] == UNASSIGNED)
+        for inp in ins[1:]: any_unknown |= (inp == UNKNOWN) | (inp == UNASSIGNED)
+
+        out[...] = ZERO
+        for inp in ins:
+            np.bitwise_xor(out, inp & 0b011, out=out)
+            if m > 4: np.bitwise_or(out, inp & 0b100, out=out)
+        np.putmask(out, any_unknown, UNKNOWN)
+    else:
+        out[...] = ZERO
+        for inp in ins: np.bitwise_xor(out, inp, out=out)
+
+
+def mv_xor(x1, x2, out=None):
+    """A multi-valued XOR operator.
+
+    :param x1: An :py:class:`MVArray` or data the :py:class:`MVArray` constructor accepts.
+    :param x2: An :py:class:`MVArray` or data the :py:class:`MVArray` constructor accepts.
+    :param out: Optionally an :py:class:`MVArray` as storage destination. If None, a new :py:class:`MVArray`
+        is returned.
+    :return: An :py:class:`MVArray` with the result.
+    """
+    m = mv_getm(x1, x2)
+    x1, x2 = mv_cast(x1, x2, m=m)
+    out = out or MVArray(np.broadcast(x1.data, x2.data).shape, m=m)
+    _mv_xor(m, out.data, x1.data, x2.data)
+    return out
+
+
+def mv_transition(init, final, out=None):
+    """Computes the logic transitions from the initial values of ``init`` to the final values of ``final``.
+    Pulses in the input data are ignored. If any of the inputs are ``UNKNOWN``, the result is ``UNKNOWN``.
+    If both inputs are ``UNASSIGNED``, the result is ``UNASSIGNED``.
+
+    :param init: An :py:class:`MVArray` or data the :py:class:`MVArray` constructor accepts.
+    :param final: An :py:class:`MVArray` or data the :py:class:`MVArray` constructor accepts.
+    :param out: Optionally an :py:class:`MVArray` as storage destination. If None, a new :py:class:`MVArray`
+        is returned.
+    :return: An :py:class:`MVArray` with the result.
+    """
+    m = mv_getm(init, final)
+    init, final = mv_cast(init, final, m=m)
+    init = init.data
+    final = final.data
+    out = out or MVArray(np.broadcast(init, final).shape, m=8)
+    out.data[...] = (init & 0b010) | (final & 0b001)
+    out.data[...] |= ((out.data << 1) ^ (out.data << 2)) & 0b100
+    unknown = (init == UNKNOWN) | (init == UNASSIGNED) | (final == UNKNOWN) | (final == UNASSIGNED)
+    unassigned = (init == UNASSIGNED) & (final == UNASSIGNED)
+    np.putmask(out.data, unknown, UNKNOWN)
+    np.putmask(out.data, unassigned, UNASSIGNED)
+    return out
+
+
+class BPArray:
+    """An n-dimensional array of m-valued logic values that uses bit-parallel storage.
+
+    The primary use of this format is in aiding efficient bit-parallel logic simulation.
+    The secondary benefit over :py:class:`MVArray` is its memory efficiency.
+    Accessing individual values is more expensive than with :py:class:`MVArray`.
+    Therefore it may be more efficient to unpack the data into an :py:class:`MVArray` and pack it again into a
+    :py:class:`BPArray` for simulation.
+
+    See :py:class:`MVArray` for constructor parameters.
+    """
+
+    def __init__(self, a, m=None):
+        if not isinstance(a, MVArray) and not isinstance(a, BPArray):
+            a = MVArray(a, m)
+            self.m = a.m
+        if isinstance(a, MVArray):
+            if m is not None and m != a.m:
+                a = MVArray(a, m)  # cast data
+            self.m = a.m
+            assert self.m in [2, 4, 8]
+            nwords = math.ceil(math.log2(self.m))
+            nbytes = (a.data.shape[-1] - 1) // 8 + 1
+            self.data = np.zeros(a.data.shape[:-1] + (nwords, nbytes), dtype=np.uint8)
+            """The wrapped 3-dimensional ndarray.
+
+            * Axis 0 is PI/PO/FF position, the length of this axis is called "width".
+            * Axis 1 has length ``ceil(log2(m))`` for storing all bits.
+            * Axis 2 are the vectors/patterns packed into uint8 words.
+            """
+            for i in range(self.data.shape[-2]):
+                self.data[..., i, :] = np.packbits((a.data >> i) & 1, axis=-1)
+        else:  # we have a BPArray
+            self.data = a.data.copy()  # TODO: support conversion to different m
+            self.m = a.m
+        self.length = a.length
+        self.width = a.width
+
+    def __repr__(self):
+        return f'<BPArray length={self.length} width={self.width} m={self.m} mem={hr_bytes(self.data.nbytes)}>'
 
     def __len__(self):
         return self.length
@@ -359,44 +460,3 @@ def bp_xor(out, *ins):
         out[..., 0, :] |= any_unknown
         out[..., 1, :] &= ~any_unknown
         out[..., 2, :] &= ~any_unknown
-
-
-class BPArray:
-    """An n-dimensional array of m-valued logic values that uses bit-parallel storage.
-
-    The primary use of this format is in aiding efficient bit-parallel logic simulation.
-    The secondary benefit over MVArray is its memory efficiency.
-    Accessing individual values is more expensive than with :py:class:`MVArray`.
-    It is advised to first construct a MVArray, pack it into a :py:class:`BPArray` for simulation and unpack the results
-    back into a :py:class:`MVArray` for value access.
-
-    The values along the last axis (vectors/patterns) are packed into uint8 words.
-    The second-last axis has length ceil(log2(m)) for storing all bits.
-    All other axes stay the same as in MVArray.
-    """
-
-    def __init__(self, a, m=None):
-        if not isinstance(a, MVArray) and not isinstance(a, BPArray):
-            a = MVArray(a, m)
-            self.m = a.m
-        if isinstance(a, MVArray):
-            if m is not None and m != a.m:
-                a = MVArray(a, m)  # cast data
-            self.m = a.m
-            assert self.m in [2, 4, 8]
-            nwords = math.ceil(math.log2(self.m))
-            nbytes = (a.data.shape[-1] - 1) // 8 + 1
-            self.data = np.zeros(a.data.shape[:-1] + (nwords, nbytes), dtype=np.uint8)
-            for i in range(self.data.shape[-2]):
-                self.data[..., i, :] = np.packbits((a.data >> i) & 1, axis=-1)
-        else:  # we have a BPArray
-            self.data = a.data.copy()  # TODO: support conversion to different m
-            self.m = a.m
-        self.length = a.length
-        self.width = a.width
-
-    def __repr__(self):
-        return f'<BPArray length={self.length} width={self.width} m={self.m} bytes={self.data.nbytes}>'
-
-    def __len__(self):
-        return self.length

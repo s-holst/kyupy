@@ -49,7 +49,7 @@ def test_4v():
     assert mva[14] == 'X-XXX'
     assert mva[15] == 'XXXXX'
 
-    
+
 def test_8v():
     c = bench.parse('input(x, y) output(a, o, n, xo) a=and(x,y) o=or(x,y) n=not(x) xo=xor(x,y)')
     s = LogicSim(c, 64, m=8)
@@ -71,7 +71,7 @@ def test_8v():
 
     for i in range(64):
         assert resp[i] == mva[i]
-        
+
 
 def test_b01(mydir):
     c = bench.load(mydir / 'b01.bench')

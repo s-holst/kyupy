@@ -9,4 +9,5 @@ API Reference
    datastructures
    parsers
    simulators
+   miscellaneous
 

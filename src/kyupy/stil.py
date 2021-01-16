@@ -4,7 +4,7 @@ The main purpose of this parser is to load scan pattern sets from STIL files.
 It supports only a very limited subset of STIL.
 
 The functions :py:func:`load` and :py:func:`read` return an intermediate representation (:class:`StilFile` object).
-Call :py:func:`StilFile.tests4v`, :py:func:`StilFile.tests8v`, or :py:func:`StilFile.responses4v` to
+Call :py:func:`StilFile.tests`, :py:func:`StilFile.tests_loc`, or :py:func:`StilFile.responses` to
 obtain the appropriate vector sets.
 """
 
@@ -54,26 +54,26 @@ class StilFile:
                     launch = dict((k, v.replace('\n', '')) for k, v in call.parameters.items())
                 else:
                     capture = dict((k, v.replace('\n', '')) for k, v in call.parameters.items())
-    
+
     def _maps(self, c):
         interface = list(c.interface) + [n for n in c.nodes if 'DFF' in n.kind]
-        intf_pos = dict([(n.name, i) for i, n in enumerate(interface)])
+        intf_pos = dict((n.name, i) for i, n in enumerate(interface))
         pi_map = [intf_pos[n] for n in self.signal_groups['_pi']]
         po_map = [intf_pos[n] for n in self.signal_groups['_po']]
         scan_maps = {}
         scan_inversions = {}
-        for chain_name, chain in self.scan_chains.items():
+        for chain in self.scan_chains.values():
             scan_map = []
             scan_in_inversion = []
             scan_out_inversion = []
             inversion = False
             for n in chain[1:-1]:
-                if n == '!': 
+                if n == '!':
                     inversion = not inversion
                 else:
                     scan_in_inversion.append(inversion)
             scan_in_inversion = list(reversed(scan_in_inversion))
-            inversion = False             
+            inversion = False
             for n in reversed(chain[1:-1]):
                 if n == '!':
                     inversion = not inversion
@@ -85,13 +85,13 @@ class StilFile:
             scan_inversions[chain[0]] = scan_in_inversion
             scan_inversions[chain[-1]] = scan_out_inversion
         return interface, pi_map, po_map, scan_maps, scan_inversions
-        
+
     def tests(self, circuit):
         """Assembles and returns a scan test pattern set for given circuit.
 
         This function assumes a static (stuck-at fault) test.
         """
-        interface, pi_map, po_map, scan_maps, scan_inversions = self._maps(circuit)
+        interface, pi_map, _, scan_maps, scan_inversions = self._maps(circuit)
         tests = logic.MVArray((len(interface), len(self.patterns)))
         for i, p in enumerate(self.patterns):
             for si_port in self.si_ports.keys():
@@ -133,10 +133,10 @@ class StilFile:
             launch.data[po_map, i] = logic.UNASSIGNED
 
         return logic.mv_transition(init, launch)
-                
+
     def responses(self, circuit):
         """Assembles and returns a scan test response pattern set for given circuit."""
-        interface, pi_map, po_map, scan_maps, scan_inversions = self._maps(circuit)
+        interface, _, po_map, scan_maps, scan_inversions = self._maps(circuit)
         resp = logic.MVArray((len(interface), len(self.patterns)))
         # resp = PackedVectors(len(self.patterns), len(interface), 2)
         for i, p in enumerate(self.patterns):
@@ -150,27 +150,27 @@ class StilFile:
                 resp.data[scan_maps[so_port], i] = pattern.data[:, 0]
                 # resp.set_values(i, p.unload[so_port], scan_maps[so_port], scan_inversions[so_port])
         return resp
-        
-        
+
+
 class StilTransformer(Transformer):
     def __init__(self):
         super().__init__()
         self._signal_groups = None
         self._calls = None
         self._scan_chains = None
-        
+
     @staticmethod
     def quoted(args): return args[0][1:-1]
 
     @staticmethod
     def call(args): return Call(args[0], dict(args[1:]))
-        
+
     @staticmethod
     def call_parameter(args): return args[0], args[1].value
 
     @staticmethod
     def signal_group(args): return args[0], args[1:]
-    
+
     @staticmethod
     def scan_chain(args):
         scan_in = None
@@ -187,7 +187,7 @@ class StilTransformer(Transformer):
         return args[0], ([scan_in] + scan_cells + [scan_out])
 
     def signal_groups(self, args): self._signal_groups = dict(args)
-    
+
     def pattern(self, args): self._calls = [c for c in args if isinstance(c, Call)]
 
     def scan_structures(self, args): self._scan_chains = dict(args)
@@ -196,7 +196,7 @@ class StilTransformer(Transformer):
         return StilFile(float(args[0]), self._signal_groups, self._scan_chains, self._calls)
 
 
-grammar = r"""
+GRAMMAR = r"""
     start: "STIL" FLOAT _ignore _block*
     _block: signal_groups | scan_structures | pattern
         | "Header" _ignore
@@ -240,7 +240,7 @@ grammar = r"""
 
 def parse(text):
     """Parses the given ``text`` and returns a :class:`StilFile` object."""
-    return Lark(grammar, parser="lalr", transformer=StilTransformer()).parse(text)
+    return Lark(GRAMMAR, parser="lalr", transformer=StilTransformer()).parse(text)
 
 
 def load(file):
