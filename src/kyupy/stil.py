@@ -49,11 +49,10 @@ class StilFile:
                 for si_port in self.si_ports:
                     if si_port in call.parameters:
                         sload[si_port] = call.parameters[si_port].replace('\n', '')
-            if call.name.endswith('_launch') or call.name.endswith('_capture'):
-                if len(launch) == 0:
-                    launch = dict((k, v.replace('\n', '')) for k, v in call.parameters.items())
-                else:
-                    capture = dict((k, v.replace('\n', '')) for k, v in call.parameters.items())
+            if call.name.endswith('_launch'):
+                launch = dict((k, v.replace('\n', '')) for k, v in call.parameters.items())
+            if call.name.endswith('_capture'):
+                capture = dict((k, v.replace('\n', '')) for k, v in call.parameters.items())
 
     def _maps(self, c):
         interface = list(c.interface) + [n for n in c.nodes if 'DFF' in n.kind]
@@ -197,7 +196,7 @@ class StilTransformer(Transformer):
 
 
 GRAMMAR = r"""
-    start: "STIL" FLOAT _ignore _block*
+    start: "STIL" FLOAT ( _ignore | ";" ) _block*
     _block: signal_groups | scan_structures | pattern
         | "Header" _ignore
         | "Signals" _ignore
@@ -206,6 +205,7 @@ GRAMMAR = r"""
         | "PatternExec" _ignore
         | "Procedures" _ignore
         | "MacroDefs" _ignore
+        | "UserKeywords" /[a-zA-Z]*;/
 
     signal_groups: "SignalGroups" "{" signal_group* "}"
     signal_group: quoted "=" "'" quoted ( "+" quoted)* "'" _ignore? ";"?

@@ -9,6 +9,7 @@ Call :py:func:`DelayFile.annotation` to match the intermediate representation to
 """
 
 from collections import namedtuple
+import re
 
 import numpy as np
 from lark import Lark, Transformer
@@ -93,12 +94,10 @@ class DelayFile:
                 if cell is None:
                     log.warn(f'Cell from SDF not found in circuit: {cn}')
                     continue
+                ipn = re.sub(r'\((neg|pos)edge ([^)]+)\)', r'\2', ipn)
                 ipin = tlib.pin_index(cell.kind, ipn)
                 opin = tlib.pin_index(cell.kind, opn)
                 kind = cell.kind.lower()
-
-                ipn2 = ipn.replace('(posedge A1)', 'A1').replace('(negedge A1)', 'A1')\
-                    .replace('(posedge A2)', 'A2').replace('(negedge A2)', 'A2')
 
                 def add_delays(_line):
                     if _line is not None:
@@ -107,13 +106,12 @@ class DelayFile:
 
                 take_avg = False
                 if kind.startswith('sdff'):
-                    if not ipn.startswith('(posedge CLK'):
+                    if not ipn.startswith('CLK'):
                         continue
                     if ffdelays and (len(cell.outs) > opin):
                         add_delays(cell.outs[opin])
                 else:
                     if kind.startswith(('xor', 'xnor')):
-                        ipin = tlib.pin_index(cell.kind, ipn2)
                         # print(ipn, ipin, times[cell.i_lines[ipin], 0, 0])
                         take_avg = timing[cell.ins[ipin]].sum() > 0
                     add_delays(cell.ins[ipin])

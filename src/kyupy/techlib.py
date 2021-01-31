@@ -29,20 +29,28 @@ class TechLib:
     @staticmethod
     def pin_index(kind, pin):
         """Returns a pin list position for a given node kind and pin name."""
+        if kind[:3] in ('OAI', 'AOI'):
+            if pin[0] == 'A': return int(pin[1])
+            if pin[0] == 'B': return int(pin[1]) + int(kind[4])
         for prefix, pins, index in [('HADD', ('B0', 'SO'), 1),
                                     ('MUX21', ('S',), 2),
+                                    ('MX2', ('S0',), 2),
+                                    ('TBUF', ('OE',), 1),
+                                    ('TINV', ('OE',), 1),
                                     ('DFF', ('QN',), 1),
+                                    ('DFF', ('D',), 0),
+                                    ('SDFF', ('D',), 0),
                                     ('SDFF', ('QN',), 1),
                                     ('SDFF', ('CLK',), 3),
                                     ('SDFF', ('RSTB',), 4),
                                     ('SDFF', ('SETB',), 5)]:
             if kind.startswith(prefix) and pin in pins: return index
-        for index, pins in enumerate([('A1', 'IN1', 'D', 'S', 'INP', 'A', 'Q', 'QN', 'Y', 'Z', 'ZN'),
-                                      ('A2', 'IN2', 'CLK', 'CO', 'SE', 'B'),
-                                      ('A3', 'IN3', 'RSTB', 'CI', 'SI'),
-                                      ('A4', 'IN4', 'SETB'),
-                                      ('A5', 'IN5'),
-                                      ('A6', 'IN6')]):
+        for index, pins in enumerate([('A1', 'IN1', 'A', 'S', 'INP', 'Q', 'QN', 'Y', 'Z', 'ZN'),
+                                      ('A2', 'IN2', 'B', 'CK', 'CLK', 'CO', 'SE'),
+                                      ('A3', 'IN3', 'C', 'RN', 'RSTB', 'CI', 'SI'),
+                                      ('A4', 'IN4', 'D', 'SN', 'SETB'),
+                                      ('A5', 'IN5', 'E'),
+                                      ('A6', 'IN6', 'F')]):
             if pin in pins: return index
         raise ValueError(f'Unknown pin index for {kind}.{pin}')
 

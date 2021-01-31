@@ -107,10 +107,10 @@ class LogicSim:
                sim.capture(state_bp)
 
         :param inject_cb: A callback function for manipulating intermediate signal values.
-            This function is called with a line index and its new logic values (in bit-parallel format) after
+            This function is called with a line and its new logic values (in bit-parallel format) after
             evaluation of a node. The callback may manipulate the given values in-place, the simulation
             resumes with the manipulated values after the callback returns.
-        :type inject_cb: ``f(int, ndarray)``
+        :type inject_cb: ``f(Line, ndarray)``
         """
         for node in self.circuit.topological_order():
             if self.state_epoch[node] != self.epoch: continue

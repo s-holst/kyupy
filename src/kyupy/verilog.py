@@ -8,7 +8,7 @@ from collections import namedtuple
 
 from lark import Lark, Transformer
 
-from . import readtext
+from . import log, readtext
 from .circuit import Circuit, Node, Line
 from .techlib import TechLib
 
@@ -17,27 +17,21 @@ Instantiation = namedtuple('Instantiation', ['type', 'name', 'pins'])
 
 class SignalDeclaration:
 
-    def __init__(self, kind, tokens):
+    def __init__(self, kind, name, rnge=None):
         self.left = None
         self.right = None
         self.kind = kind
-        if len(tokens.children) == 1:
-            self.basename = tokens.children[0]
-        else:
-            self.basename = tokens.children[2]
-            self.left = int(tokens.children[0].value)
-            self.right = int(tokens.children[1].value)
+        self.basename = name
+        self.rnge = rnge
 
     @property
     def names(self):
-        if self.left is None:
+        if self.rnge is None:
             return [self.basename]
-        if self.left <= self.right:
-            return [f'{self.basename}[{i}]' for i in range(self.left, self.right + 1)]
-        return [f'{self.basename}[{i}]' for i in range(self.left, self.right - 1, -1)]
+        return [f'{self.basename}[{i}]' for i in self.rnge]
 
     def __repr__(self):
-        return f"{self.kind}:{self.basename}[{self.left}:{self.right}]"
+        return f"{self.kind}:{self.basename}[{self.rnge}]"
 
 
 class VerilogTransformer(Transformer):
@@ -57,28 +51,33 @@ class VerilogTransformer(Transformer):
     @staticmethod
     def instantiation(args):
         return Instantiation(args[0], args[1],
-                             dict((pin.children[0], pin.children[1]) for pin in args[2:]))
+                             dict((pin.children[0],
+                                   pin.children[1]) for pin in args[2:] if len(pin.children) > 1))
 
-    def input(self, args):
-        for sd in [SignalDeclaration('input', signal) for signal in args]:
-            self._signal_declarations[sd.basename] = sd
+    def range(self, args):
+        left = int(args[0].value)
+        right = int(args[1].value)
+        return range(left, right+1) if left <= right else range(left, right-1, -1)
 
-    def inout(self, args):
-        for sd in [SignalDeclaration('input', signal) for signal in args]:  # just treat as input
-            self._signal_declarations[sd.basename] = sd
+    def declaration(self, kind, args):
+        rnge = None
+        if isinstance(args[0], range):
+            rnge = args[0]
+            args = args[1:]
+        for sd in [SignalDeclaration(kind, signal, rnge) for signal in args]:
+            if kind != 'wire' or sd.basename not in self._signal_declarations:
+                self._signal_declarations[sd.basename] = sd
 
-    def output(self, args):
-        for sd in [SignalDeclaration('output', signal) for signal in args]:
-            self._signal_declarations[sd.basename] = sd
-
-    def wire(self, args):
-        for sd in [SignalDeclaration('wire', signal) for signal in args]:
-            self._signal_declarations[sd.basename] = sd
+    def input(self, args): self.declaration("input", args)
+    def output(self, args): self.declaration("output", args)
+    def inout(self, args): self.declaration("input", args)  # just treat as input
+    def wire(self, args): self.declaration("wire", args)
 
     def module(self, args):
         c = Circuit(args[0])
         positions = {}
         pos = 0
+        const_count = 0
         for intf_sig in args[1].children:
             for name in self._signal_declarations[intf_sig].names:
                 positions[name] = pos
@@ -107,15 +106,24 @@ class VerilogTransformer(Transformer):
             elif s2 in c.forks:
                 assert s1 not in c.forks, 'assignment between two driven signals'
                 Line(c, c.forks[s2], Node(c, s1))
+            elif s2.startswith("1'b"):
+                cnode = Node(c, f'__const{s2[3]}_{const_count}__', f'__const{s2[3]}__')
+                const_count += 1
+                Line(c, cnode, Node(c, s1))
         for stmt in args[2:]:  # pass 2: connect signals to readers
             if isinstance(stmt, Instantiation):
                 for p, s in stmt.pins.items():
                     n = c.cells[stmt.name]
                     if self.tlib.pin_is_output(n.kind, p): continue
                     if s.startswith("1'b"):
-                        const = f'__const{s[3]}__'
-                        if const not in c.cells:
-                            Line(c, Node(c, const, const), Node(c, s))
+                        cname = f'__const{s[3]}_{const_count}__'
+                        cnode = Node(c, cname, f'__const{s[3]}__')
+                        const_count += 1
+                        s = cname
+                        Line(c, cnode, Node(c, s))
+                    if s not in c.forks:
+                        log.warn(f'Signal not driven: {s}')
+                        Node(c, s)  # generate fork here
                     fork = c.forks[s]
                     if self.branchforks:
                         branchfork = Node(c, fork.name + "~" + n.name + "/" + p)
@@ -125,7 +133,10 @@ class VerilogTransformer(Transformer):
         for sd in self._signal_declarations.values():
             if sd.kind == 'output':
                 for name in sd.names:
-                    Line(c, c.forks[name], c.cells[name])
+                    if name not in c.forks:
+                        log.warn(f'Output not driven: {name}')
+                    else:
+                        Line(c, c.forks[name], c.cells[name])
         return c
 
     @staticmethod
@@ -135,18 +146,19 @@ class VerilogTransformer(Transformer):
 GRAMMAR = """
     start: (module)*
     module: "module" name parameters ";" (_statement)* "endmodule"
-    parameters: "(" [ name ( "," name )* ] ")"
+    parameters: "(" [ _namelist ] ")"
     _statement: input | output | inout | tri | wire | assign | instantiation
-    input: "input" signal ( "," signal )* ";"
-    output: "output" signal ( "," signal )* ";"
-    inout: "inout" signal ( "," signal )* ";"
-    tri: "tri" name ";"
-    wire: "wire" signal ( "," signal )* ";"
+    input: "input" range? _namelist ";"
+    output: "output" range? _namelist ";"
+    inout: "inout" range? _namelist ";"
+    tri: "tri" range? _namelist ";"
+    wire: "wire" range? _namelist ";"
     assign: "assign" name "=" name ";"
     instantiation: name name "(" [ pin ( "," pin )* ] ")" ";"
-    pin: "." name "(" name ")"
-    signal: ( name | "[" /[0-9]+/ ":" /[0-9]+/ "]" name )
+    pin: "." name "(" name? ")"
+    range: "[" /[0-9]+/ ":" /[0-9]+/ "]"
 
+    _namelist: name ( "," name )*
     name: ( /[a-z_][a-z0-9_\\[\\]]*/i | /\\\\[^\\t \\r\\n]+[\\t \\r\\n](\\[[0-9]+\\])?/i | /1'b0/i | /1'b1/i )
     COMMENT: "//" /[^\\n]*/
     %ignore ( /\\r?\\n/ | COMMENT )+
