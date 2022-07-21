@@ -5,7 +5,7 @@ with open('README.rst', 'r') as f:
 
 setup(
     name='kyupy',
-    version='0.0.3',
+    version='0.0.4',
     description='High-performance processing and analysis of non-hierarchical VLSI designs',
     long_description=long_description,
     long_description_content_type='text/x-rst',

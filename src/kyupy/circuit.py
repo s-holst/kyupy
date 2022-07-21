@@ -99,6 +99,16 @@ class Node:
                 del self.circuit.cells[self.name]
             self.circuit = None
 
+    def __eq__(self, other):
+        """Checks equality of node name and kind. Does not check pin connections.
+
+        This is ok, because (name, kind) is unique within a circuit.
+        """
+        return self.name == other.name and self.kind == other.kind
+
+    def __hash__(self):
+        return hash((self.name, self.kind))
+
 
 class Line:
     """A line is a directional 1:1 connection between two nodes.
@@ -172,6 +182,13 @@ class Line:
     def __lt__(self, other):
         return self.index < other.index
 
+    def __eq__(self, other):
+        return self.driver == other.driver and self.driver_pin == other.driver_pin and \
+               self.reader == other.reader and self.reader_pin == other.reader_pin
+
+    def __hash__(self):
+        return hash((self.driver, self.driver_pin, self.reader, self.reader_pin))
+
 
 class Circuit:
     """A Circuit is a container for interconnected nodes and lines.
@@ -238,6 +255,32 @@ class Circuit:
             c.interface.append(n)
         return c
 
+    def __getstate__(self):
+        nodes = [(node.name, node.kind) for node in self.nodes]
+        lines = [(line.driver.index, line.driver_pin, line.reader.index, line.reader_pin) for line in self.lines]
+        interface = [n.index for n in self.interface]
+        return {'name': self.name,
+                'nodes': nodes,
+                'lines': lines,
+                'interface': interface }
+
+    def __setstate__(self, state):
+        self.name = state['name']
+        self.nodes = IndexList()
+        self.lines = IndexList()
+        self.interface = GrowingList()
+        self.cells = {}
+        self.forks = {}
+        for s in state['nodes']:
+            Node(self, *s)
+        for driver, driver_pin, reader, reader_pin in state['lines']:
+            Line(self, (self.nodes[driver], driver_pin), (self.nodes[reader], reader_pin))
+        for n in state['interface']:
+            self.interface.append(self.nodes[n])
+
+    def __eq__(self, other):
+        return self.nodes == other.nodes and self.lines == other.lines and self.interface == other.interface
+
     def dump(self):
         """Returns a string representation of the circuit and all its nodes.
         """
@@ -256,14 +299,14 @@ class Circuit:
         yielded first.
         """
         visit_count = [0] * len(self.nodes)
-        queue = deque(n for n in self.nodes if len(n.ins) == 0 or 'DFF' in n.kind)
+        queue = deque(n for n in self.nodes if len(n.ins) == 0 or 'dff' in n.kind.lower())
         while len(queue) > 0:
             n = queue.popleft()
             for line in n.outs:
                 if line is None: continue
                 succ = line.reader
                 visit_count[succ] += 1
-                if visit_count[succ] == len(succ.ins) and 'DFF' not in succ.kind:
+                if visit_count[succ] == len(succ.ins) and 'dff' not in succ.kind.lower():
                     queue.append(succ)
             yield n
 
@@ -282,13 +325,13 @@ class Circuit:
         yielded first.
         """
         visit_count = [0] * len(self.nodes)
-        queue = deque(n for n in self.nodes if len(n.outs) == 0 or 'DFF' in n.kind)
+        queue = deque(n for n in self.nodes if len(n.outs) == 0 or 'dff' in n.kind.lower())
         while len(queue) > 0:
             n = queue.popleft()
             for line in n.ins:
                 pred = line.driver
                 visit_count[pred] += 1
-                if visit_count[pred] == len(pred.outs) and 'DFF' not in pred.kind:
+                if visit_count[pred] == len(pred.outs) and 'dff' not in pred.kind.lower():
                     queue.append(pred)
             yield n
 
@@ -310,21 +353,21 @@ class Circuit:
 
     def fanout_free_regions(self):
         for stem in self.reversed_topological_order():
-            if len(stem.outs) == 1 and 'DFF' not in stem.kind: continue
+            if len(stem.outs) == 1 and 'dff' not in stem.kind.lower(): continue
             region = []
-            if 'DFF' in stem.kind:
+            if 'dff' in stem.kind.lower():
                 n = stem.ins[0]
-                if len(n.driver.outs) == 1 and 'DFF' not in n.driver.kind:
+                if len(n.driver.outs) == 1 and 'dff' not in n.driver.kind.lower():
                     queue = deque([n.driver])
                 else:
                     queue = deque()
             else:
                 queue = deque(n.driver for n in stem.ins
-                              if len(n.driver.outs) == 1 and 'DFF' not in n.driver.kind)
+                              if len(n.driver.outs) == 1 and 'dff' not in n.driver.kind.lower())
             while len(queue) > 0:
                 n = queue.popleft()
                 preds = [pred.driver for pred in n.ins
-                         if len(pred.driver.outs) == 1 and 'DFF' not in pred.driver.kind]
+                         if len(pred.driver.outs) == 1 and 'dff' not in pred.driver.kind.lower()]
                 queue.extend(preds)
                 region.append(n)
             yield stem, region

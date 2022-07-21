@@ -73,6 +73,45 @@ def test_8v():
         assert resp[i] == mva[i]
 
 
+def test_loop():
+    c = bench.parse('q=dff(d) d=not(q)')
+    s = LogicSim(c, 4, m=8)
+    assert len(s.interface) == 1
+    mva = MVArray([['0'], ['1'], ['R'], ['F']], m=8)
+
+    s.assign(BPArray(mva))
+    s.propagate()
+    resp_bp = BPArray((len(s.interface), s.sims))
+    s.capture(resp_bp)
+    resp = MVArray(resp_bp)
+
+    assert resp[0] == '1'
+    assert resp[1] == '0'
+    assert resp[2] == 'F'
+    assert resp[3] == 'R'
+
+    resp_bp = s.cycle(resp_bp)
+    resp = MVArray(resp_bp)
+
+    assert resp[0] == '0'
+    assert resp[1] == '1'
+    assert resp[2] == 'R'
+    assert resp[3] == 'F'
+
+
+def test_latch():
+    c = bench.parse('input(d, t) output(q) q=latch(d, t)')
+    s = LogicSim(c, 8, m=8)
+    assert len(s.interface) == 4
+    mva = MVArray(['00-0', '00-1', '01-0', '01-1', '10-0', '10-1', '11-0', '11-1'], m=8)
+    exp = MVArray(['0000', '0011', '0100', '0100', '1000', '1011', '1111', '1111'], m=8)
+
+    resp = MVArray(s.cycle(BPArray(mva)))
+
+    for i in range(len(mva)):
+        assert resp[i] == exp[i]
+
+
 def test_b01(mydir):
     c = bench.load(mydir / 'b01.bench')
 

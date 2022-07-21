@@ -40,19 +40,19 @@ class StilFile:
                 unload = {}
                 for so_port in self.so_ports:
                     if so_port in call.parameters:
-                        unload[so_port] = call.parameters[so_port].replace('\n', '')
-                if len(launch) > 0:
+                        unload[so_port] = call.parameters[so_port].replace('\n', '').replace('N', '-')
+                if len(capture) > 0:
                     self.patterns.append(ScanPattern(sload, launch, capture, unload))
                     capture = {}
                     launch = {}
                 sload = {}
                 for si_port in self.si_ports:
                     if si_port in call.parameters:
-                        sload[si_port] = call.parameters[si_port].replace('\n', '')
+                        sload[si_port] = call.parameters[si_port].replace('\n', '').replace('N', '-')
             if call.name.endswith('_launch'):
-                launch = dict((k, v.replace('\n', '')) for k, v in call.parameters.items())
+                launch = dict((k, v.replace('\n', '').replace('N', '-')) for k, v in call.parameters.items())
             if call.name.endswith('_capture'):
-                capture = dict((k, v.replace('\n', '')) for k, v in call.parameters.items())
+                capture = dict((k, v.replace('\n', '').replace('N', '-')) for k, v in call.parameters.items())
 
     def _maps(self, c):
         interface = list(c.interface) + [n for n in c.nodes if 'DFF' in n.kind]
@@ -96,15 +96,15 @@ class StilFile:
             for si_port in self.si_ports.keys():
                 pattern = logic.mv_xor(p.load[si_port], scan_inversions[si_port])
                 tests.data[scan_maps[si_port], i] = pattern.data[:, 0]
-            tests.data[pi_map, i] = logic.MVArray(p.launch['_pi']).data[:, 0]
+            tests.data[pi_map, i] = logic.MVArray(p.capture['_pi']).data[:, 0]
         return tests
 
     def tests_loc(self, circuit):
         """Assembles and returns a LoC scan test pattern set for given circuit.
 
         This function assumes a launch-on-capture (LoC) delay test.
-        It performs a logic simulation to obtain the first capture pattern (the one that launches the
-        delay test) and assembles the test pattern set from from pairs for initialization- and launch-patterns.
+        It performs a logic simulation to obtain the first capture pattern (the one that launches the delay
+        test) and assembles the test pattern set from from pairs for initialization- and launch-patterns.
         """
         interface, pi_map, po_map, scan_maps, scan_inversions = self._maps(circuit)
         init = logic.MVArray((len(interface), len(self.patterns)), m=4)
@@ -114,7 +114,7 @@ class StilFile:
             for si_port in self.si_ports.keys():
                 pattern = logic.mv_xor(p.load[si_port], scan_inversions[si_port])
                 init.data[scan_maps[si_port], i] = pattern.data[:, 0]
-            init.data[pi_map, i] = logic.MVArray(p.launch['_pi']).data[:, 0]
+            init.data[pi_map, i] = logic.MVArray(p.launch['_pi'] if '_pi' in p.launch else p.capture['_pi']).data[:, 0]
         launch_bp = logic.BPArray(init)
         sim4v = LogicSim(circuit, len(init), m=4)
         sim4v.assign(launch_bp)
@@ -122,8 +122,8 @@ class StilFile:
         sim4v.capture(launch_bp)
         launch = logic.MVArray(launch_bp)
         for i, p in enumerate(self.patterns):
-            # if there was no launch clock, then init = launch
-            if ('P' not in p.launch['_pi']) or ('P' not in p.capture['_pi']):
+            # if there was no launch cycle or launch clock, then init = launch
+            if '_pi' not in p.launch or 'P' not in p.launch['_pi'] or 'P' not in p.capture['_pi']:
                 for si_port in self.si_ports.keys():
                     pattern = logic.mv_xor(p.load[si_port], scan_inversions[si_port])
                     launch.data[scan_maps[si_port], i] = pattern.data[:, 0]

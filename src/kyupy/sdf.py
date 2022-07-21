@@ -92,7 +92,7 @@ class DelayFile:
                     continue
                 cell = find_cell(cn)
                 if cell is None:
-                    log.warn(f'Cell from SDF not found in circuit: {cn}')
+                    #log.warn(f'Cell from SDF not found in circuit: {cn}')
                     continue
                 ipn = re.sub(r'\((neg|pos)edge ([^)]+)\)', r'\2', ipn)
                 ipin = tlib.pin_index(cell.kind, ipn)
@@ -111,12 +111,15 @@ class DelayFile:
                     if ffdelays and (len(cell.outs) > opin):
                         add_delays(cell.outs[opin])
                 else:
-                    if kind.startswith(('xor', 'xnor')):
-                        # print(ipn, ipin, times[cell.i_lines[ipin], 0, 0])
-                        take_avg = timing[cell.ins[ipin]].sum() > 0
-                    add_delays(cell.ins[ipin])
-                    if take_avg:
-                        timing[cell.ins[ipin]] /= 2
+                    if ipin < len(cell.ins):
+                        if kind.startswith(('xor', 'xnor')):
+                            # print(ipn, ipin, times[cell.i_lines[ipin], 0, 0])
+                            take_avg = timing[cell.ins[ipin]].sum() > 0
+                        add_delays(cell.ins[ipin])
+                        if take_avg:
+                            timing[cell.ins[ipin]] /= 2
+                    else:
+                        log.warn(f'No line to annotate pin {ipn} of {cell}')
 
         if not interconnect or self.interconnects is None:
             return timing
@@ -139,14 +142,17 @@ class DelayFile:
                 cn2, pn2 = (n2, 'IN')
             c1 = find_cell(cn1)
             if c1 is None:
-                log.warn(f'Cell from SDF not found in circuit: {cn1}')
+                #log.warn(f'Cell from SDF not found in circuit: {cn1}')
                 continue
             c2 = find_cell(cn2)
             if c2 is None:
-                log.warn(f'Cell from SDF not found in circuit: {cn2}')
+                #log.warn(f'Cell from SDF not found in circuit: {cn2}')
                 continue
             p1, p2 = tlib.pin_index(c1.kind, pn1), tlib.pin_index(c2.kind, pn2)
             line = None
+            if len(c2.ins) <= p2:
+                log.warn(f'No line to annotate pin {pn2} of {c2}')
+                continue
             f1, f2 = c1.outs[p1].reader, c2.ins[p2].driver
             if f1 != f2:  # possible branchfork
                 assert len(f2.ins) == 1

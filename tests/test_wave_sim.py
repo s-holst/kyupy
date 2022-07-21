@@ -29,20 +29,22 @@ def test_wave_eval():
     sat[1] = 16, 16, 0
     sat[2] = 32, 16, 0
 
-    wave_eval((0b0111, 2, 0, 1), state, sat, 0, line_times)
+    sdata = np.asarray([1, -1, 0, 0], dtype='float32')
+
+    wave_eval((0b0111, 2, 0, 1), state, sat, 0, line_times, sdata)
     assert z[0] == TMIN
 
     a[0] = TMIN
-    wave_eval((0b0111, 2, 0, 1), state, sat, 0, line_times)
+    wave_eval((0b0111, 2, 0, 1), state, sat, 0, line_times, sdata)
     assert z[0] == TMIN
 
     b[0] = TMIN
-    wave_eval((0b0111, 2, 0, 1), state, sat, 0, line_times)
+    wave_eval((0b0111, 2, 0, 1), state, sat, 0, line_times, sdata)
     assert z[0] == TMAX
 
     a[0] = 1  # A _/^^^
     b[0] = 2  # B __/^^
-    wave_eval((0b0111, 2, 0, 1), state, sat, 0, line_times)
+    wave_eval((0b0111, 2, 0, 1), state, sat, 0, line_times, sdata)
     assert z[0] == TMIN  # ^^^\___ B -> Z fall delay
     assert z[1] == 2.4
     assert z[2] == TMAX
@@ -50,7 +52,7 @@ def test_wave_eval():
     a[0] = TMIN  # A ^^^^^^
     b[0] = TMIN  # B ^^^\__
     b[1] = 2
-    wave_eval((0b0111, 2, 0, 1), state, sat, 0, line_times)
+    wave_eval((0b0111, 2, 0, 1), state, sat, 0, line_times, sdata)
     assert z[0] == 2.3  # ___/^^^ B -> Z rise delay
     assert z[1] == TMAX
 
@@ -59,7 +61,7 @@ def test_wave_eval():
     b[0] = TMIN
     b[1] = 2     # B ^^\__/^^
     b[2] = 2.35
-    wave_eval((0b0111, 2, 0, 1), state, sat, 0, line_times)
+    wave_eval((0b0111, 2, 0, 1), state, sat, 0, line_times, sdata)
     assert z[0] == 2.3  # __/^^\__
     assert z[1] == 2.75
     assert z[2] == TMAX
@@ -69,7 +71,7 @@ def test_wave_eval():
     b[0] = 2  # B __/^^\__
     b[1] = 2.45
     b[2] = TMAX
-    wave_eval((0b0111, 2, 0, 1), state, sat, 0, line_times)
+    wave_eval((0b0111, 2, 0, 1), state, sat, 0, line_times, sdata)
     assert z[0] == TMIN  # ^^\__/^^
     assert z[1] == 2.4
     assert z[2] == 2.75
@@ -80,7 +82,7 @@ def test_wave_eval():
     b[0] = 2  # B __/^^\__
     b[1] = 2.35
     b[2] = TMAX
-    wave_eval((0b0111, 2, 0, 1), state, sat, 0, line_times)
+    wave_eval((0b0111, 2, 0, 1), state, sat, 0, line_times, sdata)
     assert z[0] == TMIN  # ^^^^^^
     assert z[1] == TMAX
 
@@ -89,7 +91,7 @@ def test_wave_eval():
     b[0] = TMIN
     b[1] = 2  # B ^^\__/^^
     b[2] = 2.25
-    wave_eval((0b0111, 2, 0, 1), state, sat, 0, line_times)
+    wave_eval((0b0111, 2, 0, 1), state, sat, 0, line_times, sdata)
     assert z[0] == TMAX  # ______
 
 

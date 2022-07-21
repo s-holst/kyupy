@@ -291,6 +291,23 @@ def mv_xor(x1, x2, out=None):
     return out
 
 
+def mv_latch(d, t, q_prev, out=None):
+    """A latch that is transparent if `t` is high. `q_prev` has to be the output value from the previous clock cycle.
+    """
+    m = mv_getm(d, t, q_prev)
+    d, t, q_prev = mv_cast(d, t, q_prev, m=m)
+    out = out or MVArray(np.broadcast(d.data, t.data, q_prev).shape, m=m)
+    out.data[...] = t.data & d.data & 0b011
+    out.data[...] |= ~t.data & 0b010 & (q_prev.data << 1)
+    out.data[...] |= ~t.data & 0b001 & (out.data >> 1)
+    out.data[...] |= ((out.data << 1) ^ (out.data << 2)) & 0b100
+    unknown = (t.data == UNKNOWN) \
+              | (t.data == UNASSIGNED) \
+              | (((d.data == UNKNOWN) | (d.data == UNASSIGNED)) & (t.data != ZERO))
+    np.putmask(out.data, unknown, UNKNOWN)
+    return out
+
+
 def mv_transition(init, final, out=None):
     """Computes the logic transitions from the initial values of ``init`` to the final values of ``final``.
     Pulses in the input data are ignored. If any of the inputs are ``UNKNOWN``, the result is ``UNKNOWN``.
@@ -457,6 +474,30 @@ def bp_xor(out, *ins):
             out[..., 0, :] ^= inp[..., 0, :]
             out[..., 1, :] ^= inp[..., 1, :]
             out[..., 2, :] |= inp[..., 2, :]
+        out[..., 0, :] |= any_unknown
+        out[..., 1, :] &= ~any_unknown
+        out[..., 2, :] &= ~any_unknown
+
+
+def bp_latch(out, d, t, q_prev):
+    md = out.shape[-2]
+    assert md == d.shape[-2]
+    assert md == t.shape[-2]
+    assert md == q_prev.shape[-2]
+    if md == 1:
+        out[...] = (d & t) | (q_prev & ~t)
+    elif md == 2:
+        any_unknown = t[..., 0, :] ^ t[..., 1, :]
+        any_unknown |= (d[..., 0, :] ^ d[..., 1, :]) & (t[..., 0, :] | t[..., 1, :])
+        out[...] = (d & t) | (q_prev & ~t)
+        out[..., 0, :] |= any_unknown
+        out[..., 1, :] &= ~any_unknown
+    else:
+        any_unknown = (t[..., 0, :] ^ t[..., 1, :]) & ~t[..., 2, :]
+        any_unknown |= ((d[..., 0, :] ^ d[..., 1, :]) & ~d[..., 2, :]) & (t[..., 0, :] | t[..., 1, :] | t[..., 2, :])
+        out[..., 1, :] = (d[..., 1, :] & t[..., 1, :]) | (q_prev[..., 0, :] & ~t[..., 1, :])
+        out[..., 0, :] = (d[..., 0, :] & t[..., 0, :]) | (out[..., 1, :] & ~t[..., 0, :])
+        out[..., 2, :] = out[..., 1, :] ^ out[..., 0, :]
         out[..., 0, :] |= any_unknown
         out[..., 1, :] &= ~any_unknown
         out[..., 2, :] &= ~any_unknown

@@ -30,14 +30,21 @@ class LogicSim:
         self.circuit = circuit
         self.sims = sims
         nbytes = (sims - 1) // 8 + 1
-        self.interface = list(circuit.interface) + [n for n in circuit.nodes if 'dff' in n.kind.lower()]
+        dffs = [n for n in circuit.nodes if 'dff' in n.kind.lower()]
+        latches = [n for n in circuit.nodes if 'latch' in n.kind.lower()]
+        self.interface = list(circuit.interface) + dffs + latches
+
         self.width = len(self.interface)
         """The number of bits in the circuit state (number of ports + number of state-elements)."""
+
         self.state = np.zeros((len(circuit.lines), mdim, nbytes), dtype='uint8')
         self.state_epoch = np.zeros(len(circuit.nodes), dtype='int8') - 1
         self.tmp = np.zeros((5, mdim, nbytes), dtype='uint8')
         self.zero = np.zeros((mdim, nbytes), dtype='uint8')
         self.epoch = 0
+
+        self.latch_dict = dict((n.index, i) for i, n in enumerate(latches))
+        self.latch_state = np.zeros((len(latches), mdim, nbytes), dtype='uint8')
 
         known_fct = [(f[:-4], getattr(self, f)) for f in dir(self) if f.endswith('_fct')]
         self.node_fct = []
@@ -69,8 +76,11 @@ class LogicSim:
         """
         for node, stim in zip(self.interface, stimuli.data if hasattr(stimuli, 'data') else stimuli):
             if len(node.outs) == 0: continue
-            outputs = [self.state[line] if line else self.tmp[3] for line in node.outs]
-            self.node_fct[node]([stim], outputs)
+            if node.index in self.latch_dict:
+                self.latch_state[self.latch_dict[node.index]] = stim
+            else:
+                outputs = [self.state[line] if line else self.tmp[3] for line in node.outs]
+                self.node_fct[node]([stim], outputs)
             for line in node.outs:
                 if line is not None: self.state_epoch[line.reader] = self.epoch
         for n in self.circuit.nodes:
@@ -83,13 +93,29 @@ class LogicSim:
 
     def capture(self, responses):
         """Capture the current values at the primary outputs and in the state-elements (flip-flops).
+        For primary outputs, the logic value is stored unmodified in the given target array.
+        For flip-flops, the logic value is constructed from the previous state and the new state.
 
         :param responses: A bit-parallel storage target for the responses in a compatible shape.
         :type responses: :py:class:`~kyupy.logic.BPArray`
         :returns: The given responses object.
         """
         for node, resp in zip(self.interface, responses.data if hasattr(responses, 'data') else responses):
-            if len(node.ins) > 0: resp[...] = self.state[node.ins[0]]
+            if len(node.ins) == 0: continue
+            if node.index in self.latch_dict:
+                resp[...] = self.state[node.outs[0]]
+            else:
+                resp[...] = self.state[node.ins[0]]
+            # FIXME: unclear why we should use outs for DFFs
+            #if self.m > 2 and 'dff' in node.kind.lower() and len(node.outs) > 0:
+            #    if node.outs[0] is None:
+            #        resp[1, :] = ~self.state[node.outs[1], 0, :]  # assume QN is connected, take inverse of that.
+            #    else:
+            #        resp[1, :] = self.state[node.outs[0], 0, :]
+            #    if self.m > 4:
+            #        resp[..., 2, :] = resp[..., 0, :] ^ resp[..., 1, :]
+            #    # We don't handle X or - correctly.
+
         return responses
 
     def propagate(self, inject_cb=None):
@@ -116,7 +142,8 @@ class LogicSim:
             if self.state_epoch[node] != self.epoch: continue
             inputs = [self.state[line] if line else self.zero for line in node.ins]
             outputs = [self.state[line] if line else self.tmp[3] for line in node.outs]
-            # print('sim', node)
+            if node.index in self.latch_dict:
+                inputs.append(self.latch_state[self.latch_dict[node.index]])
             self.node_fct[node](inputs, outputs)
             for line in node.outs:
                 if inject_cb is not None: inject_cb(line, self.state[line])
@@ -137,59 +164,57 @@ class LogicSim:
         self.propagate(inject_cb)
         return self.capture(state)
 
-    @staticmethod
-    def fork_fct(inputs, outputs):
+    def fork_fct(self, inputs, outputs):
         for o in outputs: o[...] = inputs[0]
 
-    @staticmethod
-    def const0_fct(_, outputs):
+    def const0_fct(self, _, outputs):
         for o in outputs: o[...] = 0
 
-    @staticmethod
-    def const1_fct(_, outputs):
+    def const1_fct(self, _, outputs):
         for o in outputs:
             o[...] = 0
             logic.bp_not(o, o)
 
-    @staticmethod
-    def not_fct(inputs, outputs):
+    def not_fct(self, inputs, outputs):
         logic.bp_not(outputs[0], inputs[0])
 
-    @staticmethod
-    def and_fct(inputs, outputs):
+    def and_fct(self, inputs, outputs):
         logic.bp_and(outputs[0], *inputs)
 
-    @staticmethod
-    def or_fct(inputs, outputs):
+    def or_fct(self, inputs, outputs):
         logic.bp_or(outputs[0], *inputs)
 
-    @staticmethod
-    def xor_fct(inputs, outputs):
+    def xor_fct(self, inputs, outputs):
         logic.bp_xor(outputs[0], *inputs)
 
-    @staticmethod
-    def sdff_fct(inputs, outputs):
+    def sdff_fct(self, inputs, outputs):
         logic.bp_buf(outputs[0], inputs[0])
         if len(outputs) > 1:
             logic.bp_not(outputs[1], inputs[0])
 
-    @staticmethod
-    def dff_fct(inputs, outputs):
+    def dff_fct(self, inputs, outputs):
         logic.bp_buf(outputs[0], inputs[0])
         if len(outputs) > 1:
             logic.bp_not(outputs[1], inputs[0])
 
-    @staticmethod
-    def nand_fct(inputs, outputs):
+    def latch_fct(self, inputs, outputs):
+        logic.bp_latch(outputs[0], inputs[0], inputs[1], inputs[2])
+        if len(outputs) > 1:
+            logic.bp_not(outputs[1], inputs[0])
+
+    def nand_fct(self, inputs, outputs):
         logic.bp_and(outputs[0], *inputs)
         logic.bp_not(outputs[0], outputs[0])
 
-    @staticmethod
-    def nor_fct(inputs, outputs):
+    def nor_fct(self, inputs, outputs):
         logic.bp_or(outputs[0], *inputs)
         logic.bp_not(outputs[0], outputs[0])
 
-    @staticmethod
-    def xnor_fct(inputs, outputs):
+    def xnor_fct(self, inputs, outputs):
         logic.bp_xor(outputs[0], *inputs)
+        logic.bp_not(outputs[0], outputs[0])
+
+    def aoi21_fct(self, inputs, outputs):
+        logic.bp_and(self.tmp[0], inputs[0], inputs[1])
+        logic.bp_or(outputs[0], self.tmp[0], inputs[2])
         logic.bp_not(outputs[0], outputs[0])

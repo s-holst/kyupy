@@ -1,5 +1,7 @@
-from kyupy.circuit import Circuit, Node, Line
+import pickle
 
+from kyupy.circuit import Circuit, Node, Line
+from kyupy import verilog
 
 def test_lines():
     c = Circuit()
@@ -99,3 +101,12 @@ def test_circuit():
 
     for n in c.topological_order():
         repr(n)
+
+
+def test_pickle(mydir):
+    c = verilog.load(mydir / 'b14.v.gz')
+    assert c is not None
+    cs = pickle.dumps(c)
+    assert cs is not None
+    c2 = pickle.loads(cs)
+    assert c == c2

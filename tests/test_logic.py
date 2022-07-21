@@ -145,6 +145,20 @@ def test_mv_operations():
     assert lg.mv_xor(x1_4v, x2_4v)[0] == '0XX1XXXXXXXX1XX0'
     assert lg.mv_xor(x1_8v, x2_8v)[0] == '0XX1PRFNXXXXXXXXXXXXXXXX1XX0NFRPPXXNPRFNRXXFRPNFFXXRFNPRNXXPNFRP'
 
+    x30_2v = lg.MVArray("0000", m=2)
+    x31_2v = lg.MVArray("1111", m=2)
+    x30_4v = lg.MVArray("0000000000000000", m=4)
+    x31_4v = lg.MVArray("1111111111111111", m=4)
+    x30_8v = lg.MVArray("0000000000000000000000000000000000000000000000000000000000000000", m=8)
+    x31_8v = lg.MVArray("1111111111111111111111111111111111111111111111111111111111111111", m=8)
+
+    assert lg.mv_latch(x1_2v, x2_2v, x30_2v)[0] == '0001'
+    assert lg.mv_latch(x1_2v, x2_2v, x31_2v)[0] == '1011'
+    assert lg.mv_latch(x1_4v, x2_4v, x30_4v)[0] == '0XX00XXX0XXX0XX1'
+    assert lg.mv_latch(x1_4v, x2_4v, x31_4v)[0] == '1XX01XXX1XXX1XX1'
+    assert lg.mv_latch(x1_8v, x2_8v, x30_8v)[0] == '0XX000000XXXXXXX0XXXXXXX0XX10R110XX000000XXR0R0R0XXF001F0XX10R11'
+    assert lg.mv_latch(x1_8v, x2_8v, x31_8v)[0] == '1XX01F001XXXXXXX1XXXXXXX1XX111111XX01F001XXR110R1XXF1F1F1XX11111'
+
 
 def test_bparray():
 
@@ -212,3 +226,27 @@ def test_bparray():
     assert lg.MVArray(out_2v)[0] == '0110'
     assert lg.MVArray(out_4v)[0] == '0XX1XXXXXXXX1XX0'
     assert lg.MVArray(out_8v)[0] == '0XX1PRFNXXXXXXXXXXXXXXXX1XX0NFRPPXXNPRFNRXXFRPNFFXXRFNPRNXXPNFRP'
+
+    x30_2v = lg.BPArray("0000", m=2)
+    x30_4v = lg.BPArray("0000000000000000", m=4)
+    x30_8v = lg.BPArray("0000000000000000000000000000000000000000000000000000000000000000", m=8)
+
+    lg.bp_latch(out_2v.data, x1_2v.data, x2_2v.data, x30_2v.data)
+    lg.bp_latch(out_4v.data, x1_4v.data, x2_4v.data, x30_4v.data)
+    lg.bp_latch(out_8v.data, x1_8v.data, x2_8v.data, x30_8v.data)
+
+    assert lg.MVArray(out_2v)[0] == '0001'
+    assert lg.MVArray(out_4v)[0] == '0XX00XXX0XXX0XX1'
+    assert lg.MVArray(out_8v)[0] == '0XX000000XXXXXXX0XXXXXXX0XX10R110XX000000XXR0R0R0XXF001F0XX10R11'
+
+    x31_2v = lg.BPArray("1111", m=2)
+    x31_4v = lg.BPArray("1111111111111111", m=4)
+    x31_8v = lg.BPArray("1111111111111111111111111111111111111111111111111111111111111111", m=8)
+
+    lg.bp_latch(out_2v.data, x1_2v.data, x2_2v.data, x31_2v.data)
+    lg.bp_latch(out_4v.data, x1_4v.data, x2_4v.data, x31_4v.data)
+    lg.bp_latch(out_8v.data, x1_8v.data, x2_8v.data, x31_8v.data)
+
+    assert lg.MVArray(out_2v)[0] == '1011'
+    assert lg.MVArray(out_4v)[0] == '1XX01XXX1XXX1XX1'
+    assert lg.MVArray(out_8v)[0] == '1XX01F001XXXXXXX1XXXXXXX1XX111111XX01F001XXR110R1XXF1F1F1XX11111'
