@@ -20,11 +20,11 @@ sys.path.insert(0, os.path.abspath('../src'))
 # -- Project information -----------------------------------------------------
 
 project = 'KyuPy'
-copyright = '2020-2021, Stefan Holst'
+copyright = '2020-2023, Stefan Holst'
 author = 'Stefan Holst'
 
 # The full version, including alpha/beta/rc tags
-release = '0.0.3'
+release = '0.0.4'
 
 
 # -- General configuration ---------------------------------------------------

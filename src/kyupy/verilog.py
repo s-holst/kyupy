@@ -1,16 +1,16 @@
 """A simple and incomplete parser for Verilog files.
 
 The main purpose of this parser is to load synthesized, non-hierarchical (flat) gate-level netlists.
-It supports only a very limited subset of Verilog.
+It supports only a subset of Verilog.
 """
 
 from collections import namedtuple
 
-from lark import Lark, Transformer
+from lark import Lark, Transformer, Tree
 
 from . import log, readtext
 from .circuit import Circuit, Node, Line
-from .techlib import TechLib
+from .techlib import NANGATE
 
 Instantiation = namedtuple('Instantiation', ['type', 'name', 'pins'])
 
@@ -35,51 +35,89 @@ class SignalDeclaration:
 
 
 class VerilogTransformer(Transformer):
-    def __init__(self, branchforks=False, tlib=TechLib()):
+    def __init__(self, branchforks=False, tlib=NANGATE):
         super().__init__()
-        self._signal_declarations = {}
         self.branchforks = branchforks
         self.tlib = tlib
 
     @staticmethod
     def name(args):
         s = args[0].value
-        if s[0] == '\\':
-            s = s[1:-1]
-        return s
+        return s[1:-1] if s[0] == '\\' else s
+
+    @staticmethod
+    def namedpin(args):
+        return tuple(args) if len(args) > 1 else (args[0], None)
 
     @staticmethod
     def instantiation(args):
-        return Instantiation(args[0], args[1],
-                             dict((pin.children[0],
-                                   pin.children[1]) for pin in args[2:] if len(pin.children) > 1))
+        pinmap = {}
+        for idx, pin in enumerate(args[2:]):
+            p = pin.children[0]
+            if isinstance(p, tuple):  # named pin
+                if p[1] is not None:
+                    pinmap[p[0]] = p[1]
+            else:  # unnamed pin
+                pinmap[idx] = p
+        return Instantiation(args[0], args[1], pinmap)
 
     def range(self, args):
         left = int(args[0].value)
-        right = int(args[1].value)
+        right = int(args[1].value) if len(args) > 1 else left
         return range(left, right+1) if left <= right else range(left, right-1, -1)
+
+    def sigsel(self, args):
+        if len(args) > 1 and isinstance(args[1], range):
+            l = [f'{args[0]}[{i}]' for i in args[1]]
+            return l if len(l) > 1 else l[0]
+        elif "'" in args[0]:
+            width, rest = args[0].split("'")
+            width = int(width)
+            base, const = rest[0], rest[1:]
+            const = int(const, {'b': 2, 'd':10, 'h':16}[base.lower()])
+            l = []
+            for _ in range(width):
+                l.insert(0, "1'b1" if (const & 1) else "1'b0")
+                const >>= 1
+            return l if len(l) > 1 else l[0]
+        else:
+            return args[0]
+
+    def concat(self, args):
+        sigs = []
+        for a in args:
+            if isinstance(a, list):
+                sigs += a
+            else:
+                sigs.append(a)
+        return sigs
 
     def declaration(self, kind, args):
         rnge = None
         if isinstance(args[0], range):
             rnge = args[0]
             args = args[1:]
-        for sd in [SignalDeclaration(kind, signal, rnge) for signal in args]:
-            if kind != 'wire' or sd.basename not in self._signal_declarations:
-                self._signal_declarations[sd.basename] = sd
+        return [SignalDeclaration(kind, signal, rnge) for signal in args]
 
-    def input(self, args): self.declaration("input", args)
-    def output(self, args): self.declaration("output", args)
-    def inout(self, args): self.declaration("input", args)  # just treat as input
-    def wire(self, args): self.declaration("wire", args)
+    def input(self, args): return self.declaration("input", args)
+    def output(self, args): return self.declaration("output", args)
+    def inout(self, args): return self.declaration("input", args)  # just treat as input
+    def wire(self, args): return self.declaration("wire", args)
 
     def module(self, args):
         c = Circuit(args[0])
         positions = {}
         pos = 0
         const_count = 0
+        sig_decls = {}
+        for decls in args[2:]:  # pass 0: collect signal declarations
+            if isinstance(decls, list):
+                if len(decls) > 0 and isinstance(decls[0], SignalDeclaration):
+                    for decl in decls:
+                        if decl.basename not in sig_decls or sig_decls[decl.basename].kind == 'wire':
+                            sig_decls[decl.basename] = decl
         for intf_sig in args[1].children:
-            for name in self._signal_declarations[intf_sig].names:
+            for name in sig_decls[intf_sig].names:
                 positions[name] = pos
                 pos += 1
         assignments = []
@@ -88,28 +126,47 @@ class VerilogTransformer(Transformer):
                 n = Node(c, stmt.name, kind=stmt.type)
                 for p, s in stmt.pins.items():
                     if self.tlib.pin_is_output(n.kind, p):
+                        if s in sig_decls:
+                            s = sig_decls[s].names
+                            if isinstance(s, list) and len(s) == 1:
+                                s = s[0]
                         Line(c, (n, self.tlib.pin_index(stmt.type, p)), Node(c, s))
-            elif stmt is not None and stmt.data == 'assign':
+            elif hasattr(stmt, 'data') and stmt.data == 'assign':
                 assignments.append((stmt.children[0], stmt.children[1]))
-        for sd in self._signal_declarations.values():
+        for sd in sig_decls.values():
             if sd.kind == 'output' or sd.kind == 'input':
                 for name in sd.names:
                     n = Node(c, name, kind=sd.kind)
                     if name in positions:
-                        c.interface[positions[name]] = n
+                        c.io_nodes[positions[name]] = n
                     if sd.kind == 'input':
                         Line(c, n, Node(c, name))
-        for s1, s2 in assignments:  # pass 1.5: process signal assignments
-            if s1 in c.forks:
-                assert s2 not in c.forks, 'assignment between two driven signals'
-                Line(c, c.forks[s1], Node(c, s2))
-            elif s2 in c.forks:
-                assert s1 not in c.forks, 'assignment between two driven signals'
-                Line(c, c.forks[s2], Node(c, s1))
-            elif s2.startswith("1'b"):
-                cnode = Node(c, f'__const{s2[3]}_{const_count}__', f'__const{s2[3]}__')
-                const_count += 1
-                Line(c, cnode, Node(c, s1))
+        for target, source in assignments:  # pass 1.5: process signal assignments
+            target_sigs = []
+            if not isinstance(target, list): target = [target]
+            for s in target:
+                if s in sig_decls:
+                    target_sigs += sig_decls[s].names
+                else:
+                    target_sigs.append(s)
+            source_sigs = []
+            if not isinstance(source, list): source = [source]
+            for s in source:
+                if s in sig_decls:
+                    source_sigs += sig_decls[s].names
+                else:
+                    source_sigs.append(s)
+            for t, s in zip(target_sigs, source_sigs):
+                if t in c.forks:
+                    assert s not in c.forks, 'assignment between two driven signals'
+                    Line(c, c.forks[t], Node(c, s))
+                elif s in c.forks:
+                    assert t not in c.forks, 'assignment between two driven signals'
+                    Line(c, c.forks[s], Node(c, t))
+                elif s.startswith("1'b"):
+                    cnode = Node(c, f'__const{s[3]}_{const_count}__', f'__const{s[3]}__')
+                    const_count += 1
+                    Line(c, cnode, Node(c, t))
         for stmt in args[2:]:  # pass 2: connect signals to readers
             if isinstance(stmt, Instantiation):
                 for p, s in stmt.pins.items():
@@ -122,28 +179,34 @@ class VerilogTransformer(Transformer):
                         s = cname
                         Line(c, cnode, Node(c, s))
                     if s not in c.forks:
-                        log.warn(f'Signal not driven: {s}')
-                        Node(c, s)  # generate fork here
+                        if f'{s}[0]' in c.forks:  # actually a 1-bit bus?
+                            s = f'{s}[0]'
+                        else:
+                            log.warn(f'Signal not driven: {s}')
+                            Node(c, s)  # generate fork here
                     fork = c.forks[s]
                     if self.branchforks:
                         branchfork = Node(c, fork.name + "~" + n.name + "/" + p)
                         Line(c, fork, branchfork)
                         fork = branchfork
                     Line(c, fork, (n, self.tlib.pin_index(stmt.type, p)))
-        for sd in self._signal_declarations.values():
+        for sd in sig_decls.values():
             if sd.kind == 'output':
                 for name in sd.names:
                     if name not in c.forks:
-                        log.warn(f'Output not driven: {name}')
-                    else:
-                        Line(c, c.forks[name], c.cells[name])
+                        if f'{name}[0]' in c.forks:  # actually a 1-bit bus?
+                            name = f'{name}[0]'
+                        else:
+                            log.warn(f'Output not driven: {name}')
+                            continue
+                    Line(c, c.forks[name], c.cells[name])
         return c
 
     @staticmethod
     def start(args): return args[0] if len(args) == 1 else args
 
 
-GRAMMAR = """
+GRAMMAR = r"""
     start: (module)*
     module: "module" name parameters ";" (_statement)* "endmodule"
     parameters: "(" [ _namelist ] ")"
@@ -153,36 +216,45 @@ GRAMMAR = """
     inout: "inout" range? _namelist ";"
     tri: "tri" range? _namelist ";"
     wire: "wire" range? _namelist ";"
-    assign: "assign" name "=" name ";"
+    assign: "assign" sigsel "=" sigsel ";"
     instantiation: name name "(" [ pin ( "," pin )* ] ")" ";"
-    pin: "." name "(" name? ")"
-    range: "[" /[0-9]+/ ":" /[0-9]+/ "]"
-
+    pin: namedpin | sigsel
+    namedpin: "." name "(" sigsel? ")"
+    range: "[" /[0-9]+/ (":" /[0-9]+/)? "]"
+    sigsel: name range? | concat
+    concat: "{" sigsel ( "," sigsel )*  "}"
     _namelist: name ( "," name )*
-    name: ( /[a-z_][a-z0-9_\\[\\]]*/i | /\\\\[^\\t \\r\\n]+[\\t \\r\\n](\\[[0-9]+\\])?/i | /1'b0/i | /1'b1/i )
-    COMMENT: "//" /[^\\n]*/
-    %ignore ( /\\r?\\n/ | COMMENT )+
-    %ignore /[\\t \\f]+/
+    name: ( /[a-z_][a-z0-9_]*/i | /\\[^\t \r\n]+[\t \r\n]/i | /[0-9]+'[bdh][0-9a-f]+/i )
+    %import common.NEWLINE
+    COMMENT: /\/\*(\*(?!\/)|[^*])*\*\// | /\(\*(\*(?!\))|[^*])*\*\)/ |  "//" /(.)*/ NEWLINE
+    %ignore ( /\r?\n/ | COMMENT )+
+    %ignore /[\t \f]+/
     """
 
 
-def parse(text, *, branchforks=False, tlib=TechLib()):
+def parse(text, tlib=NANGATE, branchforks=False):
     """Parses the given ``text`` as Verilog code.
 
     :param text: A string with Verilog code.
+    :param tlib: A technology library object that defines all known cells.
+    :type tlib: :py:class:`~kyupy.techlib.TechLib`
     :param branchforks: If set to ``True``, the returned circuit will include additional `forks` on each fanout branch.
         These forks are needed to correctly annotate interconnect delays
-        (see :py:func:`kyupy.sdf.DelayFile.annotation`).
-    :param tlib: A technology library object that provides pin name mappings.
-    :type tlib: :py:class:`~kyupy.techlib.TechLib`
-    :return: A :class:`~kyupy.circuit.Circuit` object.
+        (see :py:func:`~kyupy.sdf.DelayFile.interconnects()`).
+    :return: A :py:class:`~kyupy.circuit.Circuit` object.
     """
     return Lark(GRAMMAR, parser="lalr", transformer=VerilogTransformer(branchforks, tlib)).parse(text)
 
 
-def load(file, *args, **kwargs):
+def load(file, tlib=NANGATE, branchforks=False):
     """Parses the contents of ``file`` as Verilog code.
 
-    The given file may be gzip compressed. Takes the same keyword arguments as :py:func:`parse`.
+    :param file: A file name or a file handle. Files with `.gz`-suffix are decompressed on-the-fly.
+    :param tlib: A technology library object that defines all known cells.
+    :type tlib: :py:class:`~kyupy.techlib.TechLib`
+    :param branchforks: If set to ``True``, the returned circuit will include additional `forks` on each fanout branch.
+        These forks are needed to correctly annotate interconnect delays
+        (see :py:func:`~kyupy.sdf.DelayFile.interconnects()`).
+    :return: A :py:class:`~kyupy.circuit.Circuit` object.
     """
-    return parse(readtext(file), *args, **kwargs)
+    return parse(readtext(file), tlib, branchforks)

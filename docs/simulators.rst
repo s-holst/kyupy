@@ -1,6 +1,11 @@
 Simulators
 ==========
 
+KyuPy's simulators are optimized for cells with at most 4 inputs and 1 output.
+
+More complex cells must be mapped to simulation primitives first.
+
+
 Logic Simulation - :mod:`kyupy.logic_sim`
 -----------------------------------------
 

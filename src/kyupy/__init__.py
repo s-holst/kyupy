@@ -1,11 +1,12 @@
-"""A package for processing and analysis of non-hierarchical gate-level VLSI designs.
+"""The kyupy package itself contains a miscellaneous utility functions.
 
-The kyupy package itself contains a logger and other simple utility functions.
 In addition, it defines a ``numba`` and a ``cuda`` objects that point to the actual packages
 if they are available and otherwise point to mocks.
 """
 
 import time
+import sys
+from collections import defaultdict
 import importlib.util
 import gzip
 
@@ -15,15 +16,19 @@ import numpy as np
 _pop_count_lut = np.asarray([bin(x).count('1') for x in range(256)])
 
 
+def cdiv(x, y):
+    return -(x // -y)
+
+
 def popcount(a):
-    """Returns the number of 1-bits in a given packed numpy array."""
+    """Returns the number of 1-bits in a given packed numpy array of type ``uint8``."""
     return np.sum(_pop_count_lut[a])
 
 
 def readtext(file):
     """Reads and returns the text in a given file. Transparently decompresses \\*.gz files."""
     if hasattr(file, 'read'):
-        return file.read()
+        return file.read().decode()
     if str(file).endswith('.gz'):
         with gzip.open(file, 'rt') as f:
             return f.read()
@@ -74,6 +79,39 @@ def hr_time(seconds):
     return s
 
 
+def batchrange(nitems, maxsize):
+    """A simple generator that produces offsets and sizes for batch-loops."""
+    for offset in range(0, nitems, maxsize):
+        yield offset, min(nitems-offset, maxsize)
+
+
+class Timer:
+    def __init__(self, s=0): self.s = s
+    def __enter__(self): self.start_time = time.perf_counter(); return self
+    def __exit__(self, *args): self.s += time.perf_counter() - self.start_time
+    @property
+    def ms(self): return self.s*1e3
+    @property
+    def us(self): return self.s*1e6
+    def __repr__(self): return f'{self.s:.3f}'
+    def __add__(self, t):
+        return Timer(self.s + t.s)
+
+
+class Timers:
+    def __init__(self, t={}): self.timers = defaultdict(Timer) | t
+    def __getitem__(self, name): return self.timers[name]
+    def __repr__(self): return '{' + ', '.join([f'{k}: {v}' for k, v in self.timers.items()]) + '}'
+    def __add__(self, t):
+        tmr = Timers(self.timers)
+        for k, v in t.timers.items(): tmr.timers[k] += v
+        return tmr
+    def sum(self):
+        return sum([v.s for v in self.timers.values()])
+    def dict(self):
+        return dict([(k, v.s) for k, v in self.timers.items()])
+
+
 class Log:
     """A very simple logger that formats the messages with the number of seconds since
     program start.
@@ -81,25 +119,58 @@ class Log:
 
     def __init__(self):
         self.start = time.perf_counter()
-        self.logfile = None
+        self.logfile = sys.stdout
         """When set to a file handle, log messages are written to it instead to standard output.
-        After each write, ``flush()`` is called as well.
         """
+        self.indent = 0
+        self._limit = -1
+        self.filtered = 0
+
+    def limit(self, log_limit):
+        class Limiter:
+            def __init__(self, l): self.l = l
+            def __enter__(self): self.l.start_limit(log_limit); return self
+            def __exit__(self, *args): self.l.stop_limit()
+        return Limiter(self)
+
+    def start_limit(self, limit):
+        self.filtered = 0
+        self._limit = limit
+
+    def stop_limit(self):
+        if self.filtered > 0:
+            log.info(f'{self.filtered} more messages (filtered).')
+            self.filtered = 0
+        self._limit = -1
 
     def __getstate__(self):
         return {'elapsed': time.perf_counter() - self.start}
 
     def __setstate__(self, state):
-        self.logfile = None
+        self.logfile = sys.stdout
+        self.indent = 0
         self.start = time.perf_counter() - state['elapsed']
 
+    def write(self, s, indent=0):
+        self.logfile.write(' '*indent + s + '\n')
+        self.logfile.flush()
+
+    def li(self, item): self.write('- ' + str(item).replace('\n', '\n'+' '*(self.indent+1)), self.indent)
+    def lib(self): self.write('-', self.indent); self.indent += 1
+    def lin(self): self.write('-', self.indent-1)
+    def di(self, key, value): self.write(str(key) + ': ' + str(value).replace('\n', '\n'+' '*(self.indent+1)), self.indent)
+    def dib(self, key): self.write(str(key) + ':', self.indent); self.indent += 1
+    def din(self, key): self.write(str(key) + ':', self.indent-1)
+    def ie(self, n=1): self.indent -= n
+
     def log(self, level, message):
+        if self._limit == 0:
+            self.filtered += 1
+            return
         t = time.perf_counter() - self.start
-        if self.logfile is None:
-            print(f'{t:011.3f} {level} {message}')
-        else:
-            self.logfile.write(f'{t:011.3f} {level} {message}\n')
-            self.logfile.flush()
+        self.logfile.write(f'# {t:011.3f} {level} {message}\n')
+        self.logfile.flush()
+        self._limit -= 1
 
     def info(self, message):
         """Log an informational message."""
@@ -156,7 +227,7 @@ class MockCuda:
         self.x = 0
         self.y = 0
 
-    def jit(self, device=False):
+    def jit(self, func=None, device=False):
         _ = device  # silence "not used" warning
         outer = self
 
@@ -184,7 +255,7 @@ class MockCuda:
                     return inner
             return Launcher(func)
 
-        return make_launcher
+        return make_launcher(func) if func else make_launcher
 
     @staticmethod
     def to_device(array, to=None):
@@ -208,6 +279,8 @@ if importlib.util.find_spec('numba') is not None:
     try:
         list(numba.cuda.gpus)
         from numba import cuda
+        from numba.core import config
+        config.CUDA_LOW_OCCUPANCY_WARNINGS = False
     except CudaSupportError:
         log.warn('Cuda unavailable. Falling back to pure Python.')
         cuda = MockCuda()

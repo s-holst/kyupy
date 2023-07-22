@@ -40,3 +40,12 @@ Standard Delay Format - :mod:`kyupy.sdf`
 
 .. autoclass:: kyupy.sdf.DelayFile
    :members:
+
+Design Exchange Format - :mod:`kyupy.def_file`
+----------------------------------------------
+
+.. automodule:: kyupy.def_file
+   :members: parse, load
+
+.. autoclass:: kyupy.def_file.DefFile
+   :members:

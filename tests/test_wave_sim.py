@@ -1,150 +1,168 @@
 import numpy as np
 
-from kyupy.wave_sim import WaveSim, WaveSimCuda, wave_eval, TMIN, TMAX
+from kyupy.wave_sim import WaveSim, WaveSimCuda, wave_eval_cpu, TMIN, TMAX
 from kyupy.logic_sim import LogicSim
-from kyupy import verilog, sdf, logic
-from kyupy.logic import MVArray, BPArray
+from kyupy import logic, bench, sim
+from kyupy.logic import mvarray
 
+def test_nand_delays():
+    op = (sim.NAND4, 4, 0, 1, 2, 3, -1, 0, 0)
+    #op = (0b0111, 4, 0, 1)
+    c = np.full((5*16, 1), TMAX)  # 5 waveforms of capacity 16
+    c_locs = np.zeros((5,), dtype='int')
+    c_caps = np.zeros((5,), dtype='int')
 
-def test_wave_eval():
+    for i in range(5): c_locs[i], c_caps[i] = i*16, 16  # 1:1 mapping
+
     # SDF specifies IOPATH delays with respect to output polarity
     # SDF pulse rejection value is determined by IOPATH causing last transition and polarity of last transition
-    line_times = np.zeros((3, 2, 2))
-    line_times[0, 0, 0] = 0.1  # A -> Z rise delay
-    line_times[0, 0, 1] = 0.2  # A -> Z fall delay
-    line_times[0, 1, 0] = 0.1  # A -> Z negative pulse limit (terminate in rising Z)
-    line_times[0, 1, 1] = 0.2  # A -> Z positive pulse limit
-    line_times[1, 0, 0] = 0.3  # as above for B -> Z
-    line_times[1, 0, 1] = 0.4
-    line_times[1, 1, 0] = 0.3
-    line_times[1, 1, 1] = 0.4
+    delays = np.zeros((1, 5, 2, 2))
+    delays[0, 0, 0, 0] = 0.1  # A -> Z rise delay
+    delays[0, 0, 0, 1] = 0.2  # A -> Z fall delay
+    delays[0, 0, 1, 0] = 0.1  # A -> Z negative pulse limit (terminate in rising Z)
+    delays[0, 0, 1, 1] = 0.2  # A -> Z positive pulse limit
+    delays[0, 1, :, 0] = 0.3  # as above for B -> Z
+    delays[0, 1, :, 1] = 0.4
+    delays[0, 2, :, 0] = 0.5  # as above for C -> Z
+    delays[0, 2, :, 1] = 0.6
+    delays[0, 3, :, 0] = 0.7  # as above for D -> Z
+    delays[0, 3, :, 1] = 0.8
 
-    state = np.zeros((3*16, 1)) + TMAX  # 3 waveforms of capacity 16
-    state[::16, 0] = 16  # first entry is capacity
-    a = state[0:16, 0]
-    b = state[16:32, 0]
-    z = state[32:, 0]
-    sat = np.zeros((3, 3), dtype='int')
-    sat[0] = 0, 16, 0
-    sat[1] = 16, 16, 0
-    sat[2] = 32, 16, 0
+    simctl_int = np.asarray([0], dtype=np.int32)
 
-    sdata = np.asarray([1, -1, 0, 0], dtype='float32')
+    def wave_assert(inputs, output):
+        for i, a in zip(inputs, c.reshape(-1,16)): a[:len(i)] = i
+        wave_eval_cpu(op, c, c_locs, c_caps, 0, delays, simctl_int)
+        for i, v in enumerate(output): np.testing.assert_allclose(c.reshape(-1,16)[4,i], v)
 
-    wave_eval((0b0111, 2, 0, 1), state, sat, 0, line_times, sdata)
-    assert z[0] == TMIN
+    wave_assert([[TMAX,TMAX],[TMAX,TMAX],[TMIN,TMAX],[TMIN,TMAX]], [TMIN,TMAX]) # NAND(0,0,1,1) => 1
+    wave_assert([[TMIN,TMAX],[TMAX,TMAX],[TMIN,TMAX],[TMIN,TMAX]], [TMIN,TMAX]) # NAND(1,0,1,1) => 1
+    wave_assert([[TMIN,TMAX],[TMIN,TMAX],[TMIN,TMAX],[TMIN,TMAX]], [TMAX])      # NAND(1,1,1,1) => 0
 
-    a[0] = TMIN
-    wave_eval((0b0111, 2, 0, 1), state, sat, 0, line_times, sdata)
-    assert z[0] == TMIN
-
-    b[0] = TMIN
-    wave_eval((0b0111, 2, 0, 1), state, sat, 0, line_times, sdata)
-    assert z[0] == TMAX
-
-    a[0] = 1  # A _/^^^
-    b[0] = 2  # B __/^^
-    wave_eval((0b0111, 2, 0, 1), state, sat, 0, line_times, sdata)
-    assert z[0] == TMIN  # ^^^\___ B -> Z fall delay
-    assert z[1] == 2.4
-    assert z[2] == TMAX
-
-    a[0] = TMIN  # A ^^^^^^
-    b[0] = TMIN  # B ^^^\__
-    b[1] = 2
-    wave_eval((0b0111, 2, 0, 1), state, sat, 0, line_times, sdata)
-    assert z[0] == 2.3  # ___/^^^ B -> Z rise delay
-    assert z[1] == TMAX
-
-    # pos pulse of 0.35 at B -> 0.45 after delays
-    a[0] = TMIN  # A ^^^^^^^^
-    b[0] = TMIN
-    b[1] = 2     # B ^^\__/^^
-    b[2] = 2.35
-    wave_eval((0b0111, 2, 0, 1), state, sat, 0, line_times, sdata)
-    assert z[0] == 2.3  # __/^^\__
-    assert z[1] == 2.75
-    assert z[2] == TMAX
-
-    # neg pulse of 0.45 at B -> 0.35 after delays
-    a[0] = TMIN  # A ^^^^^^^^
-    b[0] = 2  # B __/^^\__
-    b[1] = 2.45
-    b[2] = TMAX
-    wave_eval((0b0111, 2, 0, 1), state, sat, 0, line_times, sdata)
-    assert z[0] == TMIN  # ^^\__/^^
-    assert z[1] == 2.4
-    assert z[2] == 2.75
-    assert z[3] == TMAX
-
-    # neg pulse of 0.35 at B -> 0.25 after delays (filtered)
-    a[0] = TMIN  # A ^^^^^^^^
-    b[0] = 2  # B __/^^\__
-    b[1] = 2.35
-    b[2] = TMAX
-    wave_eval((0b0111, 2, 0, 1), state, sat, 0, line_times, sdata)
-    assert z[0] == TMIN  # ^^^^^^
-    assert z[1] == TMAX
-
-    # pos pulse of 0.25 at B -> 0.35 after delays (filtered)
-    a[0] = TMIN  # A ^^^^^^^^
-    b[0] = TMIN
-    b[1] = 2  # B ^^\__/^^
-    b[2] = 2.25
-    wave_eval((0b0111, 2, 0, 1), state, sat, 0, line_times, sdata)
-    assert z[0] == TMAX  # ______
+    # Keep inputs C=1 and D=1.
+    wave_assert([[1,TMAX],[2,TMAX]], [TMIN,2.4,TMAX])              # _/⎺⎺⎺ NAND __/⎺⎺ => ⎺⎺⎺\___ (B->Z fall delay)
+    wave_assert([[TMIN,TMAX],[TMIN,2,TMAX]],  [2.3,TMAX])          # ⎺⎺⎺⎺⎺ NAND ⎺⎺\__ => ___/⎺⎺⎺ (B->Z rise delay)
+    wave_assert([[TMIN,TMAX],[TMIN,2,2.35,TMAX]], [2.3,2.75,TMAX]) # ⎺⎺⎺⎺⎺ NAND ⎺\_/⎺ => __/⎺⎺\_ (pos pulse, .35@B -> .45@Z)
+    wave_assert([[TMIN,TMAX],[TMIN,2,2.25,TMAX]], [TMAX])          # ⎺⎺⎺⎺⎺ NAND ⎺\_/⎺ => _______ (pos pulse, .25@B -> .35@Z, filtered)
+    wave_assert([[TMIN,TMAX],[2,2.45,TMAX]], [TMIN,2.4,2.75,TMAX]) # ⎺⎺⎺⎺⎺ NAND _/⎺\_ => ⎺⎺\_/⎺⎺ (neg pulse, .45@B -> .35@Z)
+    wave_assert([[TMIN,TMAX],[2,2.35,TMAX]], [TMIN,TMAX])          # ⎺⎺⎺⎺⎺ NAND _/⎺\_ => ⎺⎺⎺⎺⎺⎺⎺ (neg pulse, .35@B -> .25@Z, filtered)
 
 
-def compare_to_logic_sim(wsim):
-    tests = MVArray((len(wsim.interface), wsim.sims))
+def test_tiny_circuit():
+    c = bench.parse('input(x, y) output(a, o, n) a=and(x,y) o=or(x,y) n=not(x)')
+    delays = np.full((1, len(c.lines), 2, 2), 1.0)  # unit delay for all lines
+    wsim = WaveSim(c, delays)
+    assert wsim.s.shape[1] == 5
+
+    # values for x
+    wsim.s[:3,0,0] = 0, 10, 0
+    wsim.s[:3,0,1] = 0, 20, 1
+    wsim.s[:3,0,2] = 1, 30, 0
+    wsim.s[:3,0,3] = 1, 40, 1
+
+    # values for y
+    wsim.s[:3,1,0] = 1, 50, 0
+    wsim.s[:3,1,1] = 1, 60, 0
+    wsim.s[:3,1,2] = 1, 70, 0
+    wsim.s[:3,1,3] = 0, 80, 1
+
+    wsim.s_to_c()
+
+    x_c_loc = wsim.c_locs[wsim.ppi_offset+0] # check x waveforms
+    np.testing.assert_allclose(wsim.c[x_c_loc:x_c_loc+3, 0], [TMAX, TMAX, TMAX])
+    np.testing.assert_allclose(wsim.c[x_c_loc:x_c_loc+3, 1], [20, TMAX, TMAX])
+    np.testing.assert_allclose(wsim.c[x_c_loc:x_c_loc+3, 2], [TMIN, 30, TMAX])
+    np.testing.assert_allclose(wsim.c[x_c_loc:x_c_loc+3, 3], [TMIN, TMAX, TMAX])
+
+    y_c_loc = wsim.c_locs[wsim.ppi_offset+1] # check y waveforms
+    np.testing.assert_allclose(wsim.c[y_c_loc:y_c_loc+3, 0], [TMIN, 50, TMAX])
+    np.testing.assert_allclose(wsim.c[y_c_loc:y_c_loc+3, 1], [TMIN, 60, TMAX])
+    np.testing.assert_allclose(wsim.c[y_c_loc:y_c_loc+3, 2], [TMIN, 70, TMAX])
+    np.testing.assert_allclose(wsim.c[y_c_loc:y_c_loc+3, 3], [80, TMAX, TMAX])
+
+    wsim.c_prop()
+
+    a_c_loc = wsim.c_locs[wsim.ppo_offset+2] # check a waveforms
+    np.testing.assert_allclose(wsim.c[a_c_loc:a_c_loc+3, 0], [TMAX, TMAX, TMAX])
+    np.testing.assert_allclose(wsim.c[a_c_loc:a_c_loc+3, 1], [21, 61, TMAX])
+    np.testing.assert_allclose(wsim.c[a_c_loc:a_c_loc+3, 2], [TMIN, 31, TMAX])
+    np.testing.assert_allclose(wsim.c[a_c_loc:a_c_loc+3, 3], [81, TMAX, TMAX])
+
+    o_c_loc = wsim.c_locs[wsim.ppo_offset+3] # check o waveforms
+    np.testing.assert_allclose(wsim.c[o_c_loc:o_c_loc+3, 0], [TMIN, 51, TMAX])
+    np.testing.assert_allclose(wsim.c[o_c_loc:o_c_loc+3, 1], [TMIN, TMAX, TMAX])
+    np.testing.assert_allclose(wsim.c[o_c_loc:o_c_loc+3, 2], [TMIN, 71, TMAX])
+    np.testing.assert_allclose(wsim.c[o_c_loc:o_c_loc+3, 3], [TMIN, TMAX, TMAX])
+
+    n_c_loc = wsim.c_locs[wsim.ppo_offset+4] # check n waveforms
+    np.testing.assert_allclose(wsim.c[n_c_loc:n_c_loc+3, 0], [TMIN, TMAX, TMAX])
+    np.testing.assert_allclose(wsim.c[n_c_loc:n_c_loc+3, 1], [TMIN, 21, TMAX])
+    np.testing.assert_allclose(wsim.c[n_c_loc:n_c_loc+3, 2], [31, TMAX, TMAX])
+    np.testing.assert_allclose(wsim.c[n_c_loc:n_c_loc+3, 3], [TMAX, TMAX, TMAX])
+
+    wsim.c_to_s()
+
+    # check a captures
+    np.testing.assert_allclose(wsim.s[3:7, 2, 0], [0, TMAX, TMIN, 0])
+    np.testing.assert_allclose(wsim.s[3:7, 2, 1], [0, 21, 61, 0])
+    np.testing.assert_allclose(wsim.s[3:7, 2, 2], [1, 31, 31, 0])
+    np.testing.assert_allclose(wsim.s[3:7, 2, 3], [0, 81, 81, 1])
+
+    # check o captures
+    np.testing.assert_allclose(wsim.s[3:7, 3, 0], [1, 51, 51, 0])
+    np.testing.assert_allclose(wsim.s[3:7, 3, 1], [1, TMAX, TMIN, 1])
+    np.testing.assert_allclose(wsim.s[3:7, 3, 2], [1, 71, 71, 0])
+    np.testing.assert_allclose(wsim.s[3:7, 3, 3], [1, TMAX, TMIN, 1])
+
+    # check o captures
+    np.testing.assert_allclose(wsim.s[3:7, 4, 0], [1, TMAX, TMIN, 1])
+    np.testing.assert_allclose(wsim.s[3:7, 4, 1], [1, 21, 21, 0])
+    np.testing.assert_allclose(wsim.s[3:7, 4, 2], [0, 31, 31, 1])
+    np.testing.assert_allclose(wsim.s[3:7, 4, 3], [0, TMAX, TMIN, 0])
+
+
+def compare_to_logic_sim(wsim: WaveSim):
     choices = np.asarray([logic.ZERO, logic.ONE, logic.RISE, logic.FALL], dtype=np.uint8)
     rng = np.random.default_rng(10)
-    tests.data[...] = rng.choice(choices, tests.data.shape)
-    tests_bp = BPArray(tests)
-    wsim.assign(tests_bp)
-    wsim.propagate()
-    cdata = wsim.capture()
+    tests = rng.choice(choices, (wsim.s_len, wsim.sims))
 
-    resp = MVArray(tests)
+    wsim.s[0] = (tests & 2) >> 1
+    wsim.s[3] = (tests & 2) >> 1
+    wsim.s[1] = 0.0
+    wsim.s[2] = tests & 1
+    wsim.s[6] = tests & 1
 
-    for iidx, inode in enumerate(wsim.interface):
-        if len(inode.ins) > 0:
-            for vidx in range(wsim.sims):
-                resp.data[iidx, vidx] = logic.ZERO if cdata[iidx, vidx, 0] < 0.5 else logic.ONE
-                # resp.set_value(vidx, iidx, 0 if cdata[iidx, vidx, 0] < 0.5 else 1)
+    wsim.s_to_c()
+    wsim.c_prop()
+    wsim.c_to_s()
 
-    lsim = LogicSim(wsim.circuit, len(tests_bp))
-    lsim.assign(tests_bp)
-    lsim.propagate()
-    exp_bp = BPArray(tests_bp)
-    lsim.capture(exp_bp)
-    exp = MVArray(exp_bp)
+    resp = np.array(wsim.s[6], dtype=np.uint8) | (np.array(wsim.s[3], dtype=np.uint8)<<1)
+    resp |= ((resp ^ (resp >> 1)) & 1) << 2  # transitions
+    resp[wsim.pi_s_locs] = logic.UNASSIGNED
 
-    for i in range(8):
-        exp_str = exp[i].replace('R', '1').replace('F', '0').replace('P', '0').replace('N', '1')
-        res_str = resp[i].replace('R', '1').replace('F', '0').replace('P', '0').replace('N', '1')
-        assert res_str == exp_str
+    lsim = LogicSim(wsim.circuit, tests.shape[-1])
+    lsim.s[0] = logic.mv_to_bp(tests)
+    lsim.s_to_c()
+    lsim.c_prop()
+    lsim.c_to_s()
+    exp = logic.bp_to_mv(lsim.s[1])
 
+    resp[resp == logic.PPULSE] = logic.ZERO
+    resp[resp == logic.NPULSE] = logic.ONE
 
-def test_b14(mydir):
-    c = verilog.load(mydir / 'b14.v.gz', branchforks=True)
-    df = sdf.load(mydir / 'b14.sdf.gz')
-    lt = df.annotation(c)
-    wsim = WaveSim(c, lt, 8)
-    compare_to_logic_sim(wsim)
+    exp[exp == logic.PPULSE] = logic.ZERO
+    exp[exp == logic.NPULSE] = logic.ONE
+
+    np.testing.assert_allclose(resp, exp)
 
 
-def test_b14_strip_forks(mydir):
-    c = verilog.load(mydir / 'b14.v.gz', branchforks=True)
-    df = sdf.load(mydir / 'b14.sdf.gz')
-    lt = df.annotation(c)
-    wsim = WaveSim(c, lt, 8, strip_forks=True)
-    compare_to_logic_sim(wsim)
+def test_b15(b15_2ig_circuit, b15_2ig_delays):
+    compare_to_logic_sim(WaveSim(b15_2ig_circuit, b15_2ig_delays, 8))
 
 
-def test_b14_cuda(mydir):
-    c = verilog.load(mydir / 'b14.v.gz', branchforks=True)
-    df = sdf.load(mydir / 'b14.sdf.gz')
-    lt = df.annotation(c)
-    wsim = WaveSimCuda(c, lt, 8)
-    compare_to_logic_sim(wsim)
+def test_b15_strip_forks(b15_2ig_circuit, b15_2ig_delays):
+    compare_to_logic_sim(WaveSim(b15_2ig_circuit, b15_2ig_delays, 8, strip_forks=True))
+
+
+def test_b15_cuda(b15_2ig_circuit, b15_2ig_delays):
+    compare_to_logic_sim(WaveSimCuda(b15_2ig_circuit, b15_2ig_delays, 8, strip_forks=True))

@@ -21,9 +21,9 @@ class BenchTransformer(Transformer):
 
     def start(self, _): return self.c
 
-    def parameters(self, args): return [self.c.get_or_add_fork(name) for name in args]
+    def parameters(self, args): return [self.c.get_or_add_fork(str(name)) for name in args]
 
-    def interface(self, args): self.c.interface.extend(args[0])
+    def interface(self, args): self.c.io_nodes.extend(args[0])
 
     def assignment(self, args):
         name, cell_type, drivers = args
@@ -57,8 +57,8 @@ def parse(text, name=None):
 def load(file, name=None):
     """Parses the contents of ``file`` as ISCAS89 bench code.
 
-    :param file: The file to be loaded.
-    :param name: The name of the circuit. If none given, the file name is used as circuit name.
+    :param file: The file to be loaded. Files with `.gz`-suffix are decompressed on-the-fly.
+    :param name: The name of the circuit. If None, the file name is used as circuit name.
     :return: A :class:`Circuit` object.
     """
     return parse(readtext(file), name=name or str(file))

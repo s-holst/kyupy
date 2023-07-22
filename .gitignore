@@ -1,10 +1,12 @@
-**/__pycache__
-**/.ipynb_checkpoints
-**/.pytest_cache
-**/.DS_Store
-**/*.pyc
+__pycache__
+.ipynb_checkpoints
+.pytest_cache
+.DS_Store
+*.pyc
 docs/_build
 build
 dist
 .idea
+.vscode
 src/kyupy.egg-info
+*nogit*

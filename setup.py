@@ -14,7 +14,7 @@ setup(
     url='https://github.com/s-holst/kyupy',
     author='Stefan Holst',
     author_email='mail@s-holst.de',
-    python_requires='>=3.6',
+    python_requires='>=3.8',
     install_requires=[
         'numpy>=1.17.0',
         'lark-parser>=0.8.0'
@@ -33,9 +33,8 @@ setup(
         'Operating System :: OS Independent',
         'Programming Language :: Python :: 3',
         'Programming Language :: Python :: 3 :: Only',
-        'Programming Language :: Python :: 3.6',
-        'Programming Language :: Python :: 3.7',
         'Programming Language :: Python :: 3.8',
         'Programming Language :: Python :: 3.9',
+        'Programming Language :: Python :: 3.10',
     ],
 )

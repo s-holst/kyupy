@@ -1,3 +1,5 @@
+# pip install sphinx sphinx-rtd-theme
+#
 # Minimal makefile for Sphinx documentation
 #
 

@@ -1,11 +1,10 @@
 """A simple and incomplete parser for the Standard Delay Format (SDF).
 
-The main purpose of this parser is to extract pin-to-pin delay and interconnect delay information from SDF files.
-Sophisticated timing specifications (timing checks, conditional delays, etc.) are currently not supported.
+This parser extracts pin-to-pin delay and interconnect delay information from SDF files.
+Sophisticated timing specifications (timing checks, conditional delays, etc.) are ignored.
 
-The functions :py:func:`load` and :py:func:`read` return an intermediate representation (:class:`DelayFile` object).
-Call :py:func:`DelayFile.annotation` to match the intermediate representation to a given circuit.
-
+The functions :py:func:`parse` and :py:func:`load` return an intermediate representation (:class:`DelayFile` object).
+Call :py:func:`DelayFile.iopaths` and :py:func:`DelayFile.interconnects` to generate delay information for a given circuit.
 """
 
 from collections import namedtuple
@@ -15,6 +14,7 @@ import numpy as np
 from lark import Lark, Transformer
 
 from . import log, readtext
+from .circuit import Circuit
 from .techlib import TechLib
 
 
@@ -27,145 +27,112 @@ class DelayFile:
     """
     def __init__(self, name, cells):
         self.name = name
-        if None in cells:
-            self.interconnects = cells[None]
-        else:
-            self.interconnects = None
+        self._interconnects = cells.get(None, None)
         self.cells = dict((n, l) for n, l in cells.items() if n)
 
     def __repr__(self):
         return '\n'.join(f'{n}: {l}' for n, l in self.cells.items()) + '\n' + \
-               '\n'.join(str(i) for i in self.interconnects)
+               '\n'.join(str(i) for i in self._interconnects)
 
-    def annotation(self, circuit, tlib=TechLib(), dataset=1, interconnect=True, ffdelays=True):
-        """Constructs an 3-dimensional ndarray with timing data for each line in ``circuit``.
+    def iopaths(self, circuit:Circuit, tlib:TechLib):
+        """Constructs an ndarray containing all IOPATH delays.
 
-        An IOPATH delay for a node is annotated to the line connected to the input pin specified in the IOPATH.
+        All IOPATH delays for a node ``n`` are annotated to the line connected to the input pin specified in the IOPATH.
 
-        Currently, only ABSOLUTE IOPATH and INTERCONNECT delays are supported.
-        Pulse rejection limits are derived from absolute delays, explicit declarations (PATHPULSE etc.) are ignored.
+        Limited support of SDF spec:
 
-        :param circuit: The circuit to annotate. Names from the STIL file are matched to the node names.
-        :type circuit: :class:`~kyupy.circuit.Circuit`
-        :param tlib: A technology library object that provides pin name mappings.
-        :type tlib: :py:class:`~kyupy.techlib.TechLib`
-        :param dataset: SDFs store multiple values for each delay (e.g. minimum, typical, maximum).
-            An integer selects the dataset to use (default is 1 for 'typical').
-            If a tuple is given, the annotator will calculate the average of multiple datasets.
-        :type dataset: ``int`` or ``tuple``
-        :param interconnect: Whether or not to include the delays of interconnects in the annotation.
-            To properly annotate interconnect delays, the circuit model has to include a '__fork__' node on
-            every signal and every fanout-branch. The Verilog parser aids in this by setting the parameter
-            `branchforks=True` in :py:func:`kyupy.verilog.parse`.
-        :type interconnect: ``bool``
-        :param ffdelays: Whether or not to include the delays of flip-flops in the annotation.
-        :type ffdelays: ``bool``
-        :return: A 3-dimensional ndarray with timing data.
+        * Only ABSOLUTE delay values are supported.
+        * Only two delvals per delval_list is supported. First is rising/posedge, second is falling/negedge
+          transition at the output of the IOPATH (SDF spec, pp. 3-17).
+        * PATHPULSE declarations are ignored.
 
-            * Axis 0: line index.
-            * Axis 1: type of timing data: 0='delay', 1='pulse rejection limit'.
-            * Axis 2: The polarity of the output transition of the reading node: 0='rising', 1='falling'.
+        The axes convention of KyuPy's delay data arrays is as follows:
 
-            The polarity for pulse rejection is determined by the latter transition of the pulse.
-            E.g., ``timing[42, 1, 0]`` is the rejection limit of a negative pulse at the output
-            of the reader of line 42.
+        * Axis 0: dataset (usually 3 datasets per SDF-file)
+        * Axis 1: line index (e.g. ``n.ins[0]``, ``n.ins[1]``)
+        * Axis 2: polarity of the transition at the IOPATH-input (e.g. at ``n.ins[0]`` or ``n.ins[1]``), 0='rising/posedge', 1='falling/negedge'
+        * Axis 3: polarity of the transition at the IOPATH-output (at ``n.outs[0]``), 0='rising/posedge', 1='falling/negedge'
         """
-        def select_del(_delvals, idx):
-            if isinstance(dataset, tuple):
-                return sum(_delvals[idx][d] for d in dataset) / len(dataset)
-            return _delvals[idx][dataset]
 
-        def find_cell(name):
-            if name not in circuit.cells:
-                name = name.replace('\\', '')
-            if name not in circuit.cells:
-                name = name.replace('[', '_').replace(']', '_')
-            if name not in circuit.cells:
-                return None
-            return circuit.cells[name]
+        def find_cell(name:str):
+            if name not in circuit.cells: name = name.replace('\\', '')
+            if name not in circuit.cells: name = name.replace('[', '_').replace(']', '_')
+            return circuit.cells.get(name, None)
 
-        timing = np.zeros((len(circuit.lines), 2, 2))
-        for cn, iopaths in self.cells.items():
-            for ipn, opn, *delvals in iopaths:
-                delvals = [d if len(d) > 0 else [0, 0, 0] for d in delvals]
-                if max(max(delvals)) == 0:
-                    continue
-                cell = find_cell(cn)
-                if cell is None:
-                    #log.warn(f'Cell from SDF not found in circuit: {cn}')
-                    continue
-                ipn = re.sub(r'\((neg|pos)edge ([^)]+)\)', r'\2', ipn)
-                ipin = tlib.pin_index(cell.kind, ipn)
-                opin = tlib.pin_index(cell.kind, opn)
-                kind = cell.kind.lower()
+        delays = np.zeros((len(circuit.lines), 2, 2, 3))  # dataset last during construction.
 
-                def add_delays(_line):
-                    if _line is not None:
-                        timing[_line, :, 0] += select_del(delvals, 0)
-                        timing[_line, :, 1] += select_del(delvals, 1)
-
-                take_avg = False
-                if kind.startswith('sdff'):
-                    if not ipn.startswith('CLK'):
-                        continue
-                    if ffdelays and (len(cell.outs) > opin):
-                        add_delays(cell.outs[opin])
-                else:
-                    if ipin < len(cell.ins):
-                        if kind.startswith(('xor', 'xnor')):
-                            # print(ipn, ipin, times[cell.i_lines[ipin], 0, 0])
-                            take_avg = timing[cell.ins[ipin]].sum() > 0
-                        add_delays(cell.ins[ipin])
-                        if take_avg:
-                            timing[cell.ins[ipin]] /= 2
+        for name, iopaths in self.cells.items():
+            name = name.replace('\\', '')
+            if cell := circuit.cells.get(name, None):
+                for i_pin_spec, o_pin_spec, *dels in iopaths:
+                    if i_pin_spec.startswith('(posedge '): i_pol_idxs = [0]
+                    elif i_pin_spec.startswith('(negedge '): i_pol_idxs = [1]
+                    else: i_pol_idxs = [0, 1]
+                    i_pin_spec = re.sub(r'\((neg|pos)edge ([^)]+)\)', r'\2', i_pin_spec)
+                    if line := cell.ins[tlib.pin_index(cell.kind, i_pin_spec)]:
+                        delays[line, i_pol_idxs] = [d if len(d) > 0 else [0, 0, 0] for d in dels]
                     else:
-                        log.warn(f'No line to annotate pin {ipn} of {cell}')
+                        log.warn(f'No line to annotate in circuit: {i_pin_spec} for {cell}')
+            else:
+                log.warn(f'Name from SDF not found in circuit: {name}')
 
-        if not interconnect or self.interconnects is None:
-            return timing
+        return np.moveaxis(delays, -1, 0)
 
-        for n1, n2, *delvals in self.interconnects:
+    def interconnects(self, circuit:Circuit, tlib:TechLib):
+        """Constructs an ndarray containing all INTERCONNECT delays.
+
+        To properly annotate interconnect delays, the circuit model has to include a '__fork__' node on
+        every signal and every fanout-branch. The Verilog parser aids in this by setting the parameter
+        `branchforks=True` in :py:func:`~kyupy.verilog.parse` or :py:func:`~kyupy.verilog.load`.
+
+        Limited support of SDF spec:
+
+        * Only ABSOLUTE delay values are supported.
+        * Only two delvals per delval_list is supported. First is rising/posedge, second is falling/negedge
+          transition.
+        * PATHPULSE declarations are ignored.
+
+        The axes convention of KyuPy's delay data arrays is as follows:
+
+        * Axis 0: dataset (usually 3 datasets per SDF-file)
+        * Axis 1: line index. Usually input line of a __fork__.
+        * Axis 2: (axis of size 2 for compatability to IOPATH results. Values are broadcast along this axis.)
+        * Axis 3: polarity of the transition, 0='rising/posedge', 1='falling/negedge'
+        """
+
+        delays = np.zeros((len(circuit.lines), 2, 2, 3))  # dataset last during construction.
+
+        for n1, n2, *delvals in self._interconnects:
             delvals = [d if len(d) > 0 else [0, 0, 0] for d in delvals]
-            if max(max(delvals)) == 0:
+            if max(max(delvals)) == 0: continue
+            cn1, pn1 = n1.split('/') if '/' in n1 else (n1, None)
+            cn2, pn2 = n2.split('/') if '/' in n2 else (n2, None)
+            cn1 = cn1.replace('\\','')
+            cn2 = cn2.replace('\\','')
+            c1, c2 = circuit.cells[cn1], circuit.cells[cn2]
+            p1 = tlib.pin_index(c1.kind, pn1) if pn1 is not None else 0
+            p2 = tlib.pin_index(c2.kind, pn2) if pn2 is not None else 0
+            if len(c1.outs) <= p1 or c1.outs[p1] is None:
+                log.warn(f'No line to annotate pin {pn1} of {c1}')
                 continue
-            if '/' in n1:
-                i = n1.rfind('/')
-                cn1 = n1[0:i]
-                pn1 = n1[i+1:]
-            else:
-                cn1, pn1 = (n1, 'Z')
-            if '/' in n2:
-                i = n2.rfind('/')
-                cn2 = n2[0:i]
-                pn2 = n2[i+1:]
-            else:
-                cn2, pn2 = (n2, 'IN')
-            c1 = find_cell(cn1)
-            if c1 is None:
-                #log.warn(f'Cell from SDF not found in circuit: {cn1}')
-                continue
-            c2 = find_cell(cn2)
-            if c2 is None:
-                #log.warn(f'Cell from SDF not found in circuit: {cn2}')
-                continue
-            p1, p2 = tlib.pin_index(c1.kind, pn1), tlib.pin_index(c2.kind, pn2)
-            line = None
-            if len(c2.ins) <= p2:
+            if len(c2.ins) <= p2 or c2.ins[p2] is None:
                 log.warn(f'No line to annotate pin {pn2} of {c2}')
                 continue
-            f1, f2 = c1.outs[p1].reader, c2.ins[p2].driver
-            if f1 != f2:  # possible branchfork
-                assert len(f2.ins) == 1
+            f1, f2 = c1.outs[p1].reader, c2.ins[p2].driver  # find the forks between cells.
+            assert f1.kind == '__fork__'
+            assert f2.kind == '__fork__'
+            if f1 != f2:  # at least two forks, make sure f2 is a branchfork connected to f1
+                assert len(f2.outs) == 1
+                assert f1.outs[f2.ins[0].driver_pin] == f2.ins[0]
                 line = f2.ins[0]
-                assert f1.outs[f2.ins[0].driver_pin] == line
-            elif len(f2.outs) == 1:  # no fanout?
+            elif len(f2.outs) == 1:  # f1==f2, only OK when there is no fanout.
                 line = f2.ins[0]
-            if line is not None:
-                timing[line, :, 0] += select_del(delvals, 0)
-                timing[line, :, 1] += select_del(delvals, 1)
             else:
-                log.warn(f'No branchfork for annotating interconnect delay {c1.name}/{p1}->{c2.name}/{p2}')
-        return timing
+                log.warn(f'No branchfork to annotate interconnect delay {c1.name}/{p1}->{c2.name}/{p2}')
+                continue
+            delays[line, :] = delvals
+
+        return np.moveaxis(delays, -1, 0)
 
 
 def sanitize(args):
@@ -236,6 +203,6 @@ def parse(text):
 def load(file):
     """Parses the contents of ``file`` and returns a :class:`DelayFile` object.
 
-    The given file may be gzip compressed.
+    Files with `.gz`-suffix are decompressed on-the-fly.
     """
     return parse(readtext(file))

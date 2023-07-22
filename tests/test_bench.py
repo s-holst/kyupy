@@ -12,4 +12,4 @@ def test_b01(mydir):
 def test_simple():
     c = bench.parse('input(a, b) output(z) z=and(a,b)')
     assert len(c.nodes) == 4
-    assert len(c.interface) == 3
+    assert len(c.io_nodes) == 3
