@@ -41,7 +41,7 @@ class StilFile:
                 unload = {}
                 for so_port in self.so_ports:
                     if so_port in call.parameters:
-                        unload[so_port] = call.parameters[so_port].replace('\n', '').replace('N', '-')
+                        unload[so_port] = call.parameters[so_port]
                 if len(capture) > 0:
                     self.patterns.append(ScanPattern(sload, launch, capture, unload))
                     capture = {}
@@ -49,11 +49,9 @@ class StilFile:
                 sload = {}
                 for si_port in self.si_ports:
                     if si_port in call.parameters:
-                        sload[si_port] = call.parameters[si_port].replace('\n', '').replace('N', '-')
-            if call.name.endswith('_launch'):
-                launch = dict((k, v.replace('\n', '').replace('N', '-')) for k, v in call.parameters.items())
-            if call.name.endswith('_capture'):
-                capture = dict((k, v.replace('\n', '').replace('N', '-')) for k, v in call.parameters.items())
+                        sload[si_port] = call.parameters[si_port]
+            if call.name.endswith('_launch'): launch = call.parameters
+            if call.name.endswith('_capture'): capture = call.parameters
 
     def _maps(self, c):
         interface = list(c.io_nodes) + [n for n in c.nodes if 'DFF' in n.kind]
@@ -100,12 +98,12 @@ class StilFile:
         tests = np.full((len(interface), len(self.patterns)), logic.UNASSIGNED)
         for i, p in enumerate(self.patterns):
             for si_port in self.si_ports.keys():
-                pattern = logic.mvarray(p.load[si_port])
+                pattern = logic.mvarray(p.load[si_port][0])
                 inversions = np.choose((pattern == logic.UNASSIGNED) | (pattern == logic.UNKNOWN),
                                        [scan_inversions[si_port], logic.ZERO]).astype(np.uint8)
                 np.bitwise_xor(pattern, inversions, out=pattern)
                 tests[scan_maps[si_port], i] = pattern
-            tests[pi_map, i] = logic.mvarray(p.capture['_pi'])
+            tests[pi_map, i] = logic.mvarray(p.capture['_pi'][0])
         return tests
 
     def tests_loc(self, circuit, init_filter=None, launch_filter=None):
@@ -134,12 +132,12 @@ class StilFile:
         for i, p in enumerate(self.patterns):
             # init.set_values(i, '0' * len(interface))
             for si_port in self.si_ports.keys():
-                pattern = logic.mvarray(p.load[si_port])
+                pattern = logic.mvarray(p.load[si_port][0])
                 inversions = np.choose((pattern == logic.UNASSIGNED) | (pattern == logic.UNKNOWN),
                                        [scan_inversions[si_port], logic.ZERO]).astype(np.uint8)
                 np.bitwise_xor(pattern, inversions, out=pattern)
                 init[scan_maps[si_port], i] = pattern
-            init[pi_map, i] = logic.mvarray(p.launch['_pi'] if '_pi' in p.launch else p.capture['_pi'])
+            init[pi_map, i] = logic.mvarray(p.launch['_pi'][0] if '_pi' in p.launch else p.capture['_pi'][0])
         if init_filter: init = init_filter(init)
         sim8v = LogicSim(circuit, init.shape[-1], m=8)
         sim8v.s[0] = logic.mv_to_bp(init)
@@ -149,12 +147,12 @@ class StilFile:
         launch = logic.bp_to_mv(sim8v.s[1])[..., :init.shape[-1]]
         for i, p in enumerate(self.patterns):
             # if there was no launch cycle or launch clock, then init = launch
-            if '_pi' not in p.launch or 'P' not in p.launch['_pi'] or 'P' not in p.capture['_pi']:
+            if '_pi' not in p.launch or 'P' not in p.launch['_pi'][0] or 'P' not in p.capture['_pi'][0]:
                 for si_port in self.si_ports.keys():
-                    pattern = logic.mv_xor(logic.mvarray(p.load[si_port]), scan_inversions[si_port])
+                    pattern = logic.mv_xor(logic.mvarray(p.load[si_port][0]), scan_inversions[si_port])
                     launch[scan_maps[si_port], i] = pattern
-            if '_pi' in p.capture and 'P' in p.capture['_pi']:
-                launch[pi_map, i] = logic.mvarray(p.capture['_pi'])
+            if '_pi' in p.capture and 'P' in p.capture['_pi'][0]:
+                launch[pi_map, i] = logic.mvarray(p.capture['_pi'][0])
             launch[po_map, i] = logic.UNASSIGNED
         if launch_filter: launch = launch_filter(launch)
 
@@ -171,9 +169,9 @@ class StilFile:
         interface, _, po_map, scan_maps, scan_inversions = self._maps(circuit)
         resp = np.full((len(interface), len(self.patterns)), logic.UNASSIGNED)
         for i, p in enumerate(self.patterns):
-            resp[po_map, i] = logic.mvarray(p.capture['_po'] if len(p.capture) > 0 else p.launch['_po'])
+            resp[po_map, i] = logic.mvarray(p.capture['_po'][0] if len(p.capture) > 0 else p.launch['_po'][0])
             for so_port in self.so_ports.keys():
-                pattern = logic.mv_xor(logic.mvarray(p.unload[so_port]), scan_inversions[so_port])
+                pattern = logic.mv_xor(logic.mvarray(p.unload[so_port][0]), scan_inversions[so_port])
                 resp[scan_maps[so_port], i] = pattern
         return resp
 
@@ -192,7 +190,7 @@ class StilTransformer(Transformer):
     def call(args): return Call(args[0], dict(args[1:]))
 
     @staticmethod
-    def call_parameter(args): return args[0], args[1].value
+    def call_parameter(args): return args[0], (args[1].value.replace('\n', '').replace('N', '-'), args[1].start_pos)
 
     @staticmethod
     def signal_group(args): return args[0], args[1:]

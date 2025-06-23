@@ -7,22 +7,49 @@
 (TEMPERATURE 25.00:25.00:25.00)
 (TIMESCALE 1ns)
 (CELL
-  (CELLTYPE "NAND2X1")
+  (CELLTYPE "NAND2_X1")
   (INSTANCE nandgate)
   (DELAY
     (ABSOLUTE
-    (IOPATH IN1 QN (0.099:0.103:0.103) (0.122:0.127:0.127))
-    (IOPATH IN2 QN (0.083:0.086:0.086) (0.100:0.104:0.104))
+    (IOPATH A1 ZN (0.099:0.103:0.103) (0.122:0.127:0.127))
+    (IOPATH A2 ZN (0.083:0.086:0.086) (0.100:0.104:0.104))
     )
   )
 )
 (CELL
-  (CELLTYPE "AND2X1")
+  (CELLTYPE "AND2_X1")
   (INSTANCE andgate)
   (DELAY
     (ABSOLUTE
-    (IOPATH IN1 Q (0.367:0.378:0.378) (0.351:0.377:0.377))
-    (IOPATH IN2 Q (0.366:0.375:0.375) (0.359:0.370:0.370))
+    (IOPATH A1 ZN (0.367:0.378:0.378) (0.351:0.377:0.377))
+    (IOPATH A2 ZN (0.366:0.375:0.375) (0.359:0.370:0.370))
+    )
+  )
+)
+(CELL
+  (CELLTYPE "OAI21_X1")
+  (INSTANCE oai21gate)
+  (DELAY 
+    (ABSOLUTE
+    (IOPATH B1 ZN (0.000:0.025:0.025) (0.000:0.013:0.013))
+    (IOPATH B2 ZN (0.000:0.030:0.030) (0.000:0.016:0.016))
+    ( COND (B1 == 1'b0) && (B2 == 1'b1) (IOPATH A ZN (0.000:0.018:0.018)))
+    (COND (B1 == 1'b1) && (B2 == 1'b0) (IOPATH A ZN (0.000:0.018:0.018) (0.000:0.016:0.016)))
+    (COND (B1 == 1'b1) && (B2 == 1'b1) (IOPATH A ZN (0.000:0.019:0.019) (0.000:0.014:0.014)))
+    )
+  )
+)
+(CELL
+  (CELLTYPE "MUX2_X1")
+  (INSTANCE mux2gate)
+  (DELAY 
+    (ABSOLUTE
+    (COND (B == 1'b0) && (S == 1'b0) (IOPATH A Z (0.000:0.037:0.037) (0.000:0.058:0.058)))
+    (COND (B == 1'b1) && (S == 1'b0) (IOPATH A Z (0.000:0.037:0.037) (0.000:0.058:0.058)))
+    (COND (A == 1'b0) && (S == 1'b1) (IOPATH B Z (0.000:0.035:0.035) (0.000:0.056:0.056)))
+    (COND (A == 1'b1) && (S == 1'b1) (IOPATH B Z (0.000:0.035:0.035) (0.000:0.056:0.056)))
+    (COND (A == 1'b0) && (B == 1'b1) (IOPATH S Z (0.000:0.047:0.047) (0.000:0.073:0.073)))
+    (COND (A == 1'b1) && (B == 1'b0) (IOPATH S Z (0.000:0.072:0.072) (0.000:0.064:0.064)))
     )
   )
 )

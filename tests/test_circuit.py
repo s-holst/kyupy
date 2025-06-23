@@ -1,8 +1,29 @@
 import pickle
 
-from kyupy.circuit import Circuit, Node, Line
+from kyupy.circuit import GrowingList, Circuit, Node, Line
 from kyupy import verilog, bench
 from kyupy.techlib import SAED32
+
+def test_growing_list():
+    gl = GrowingList()
+    assert gl.free_idx == 0
+    gl[0] = 1
+    assert gl.free_idx == 1
+    gl[2] = 1
+    assert gl.free_idx == 1
+    gl[0] = None
+    assert gl.free_idx == 0
+    gl[0] = 1
+    assert gl.free_idx == 1
+    gl[1] = 1
+    assert gl.free_idx == 3
+    gl.append(1)
+    assert gl.free_idx == 4
+    gl[2] = None
+    assert gl.free_idx == 2
+    gl[2] = 1
+    gl[1] = None
+    assert gl.free_idx == 1
 
 def test_lines():
     c = Circuit()

@@ -1,0 +1,32 @@
+[project]
+name = "kyupy"
+version = "0.0.5"
+authors = [
+  { name="Stefan Holst", email="mail@s-holst.de" },
+]
+description = 'High-performance processing and analysis of non-hierarchical VLSI designs'
+readme = "README.rst"
+requires_python = ">=3.8"
+dependencies = [
+    "numpy>=1.17.0",
+    "lark-parser>=0.8.0",
+]
+classifiers = [
+        "Development Status :: 3 - Alpha",
+        "Environment :: GPU :: NVIDIA CUDA",
+        "Intended Audience :: Science/Research",
+        "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
+        "License :: OSI Approved :: MIT License",
+        "Operating System :: OS Independent",
+        "Programming Language :: Python :: 3",
+]
+license = "MIT"
+license-files = ["LICENSE.txt"]
+
+[project.urls]
+homepage = "https://github.com/s-holst/kyupy"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+

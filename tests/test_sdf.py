@@ -2,7 +2,7 @@ import numpy as np
 
 from kyupy import sdf, verilog, bench
 from kyupy.wave_sim import WaveSim, TMAX, TMIN
-from kyupy.techlib import SAED32, SAED90
+from kyupy.techlib import SAED32, NANGATE45
 
 def test_parse():
     test = '''
@@ -80,9 +80,9 @@ def test_b15(mydir):
 
 
 def test_gates(mydir):
-    c = verilog.load(mydir / 'gates.v', tlib=SAED90)
+    c = verilog.load(mydir / 'gates.v', tlib=NANGATE45)
     df = sdf.load(mydir / 'gates.sdf')
-    lt = df.iopaths(c, tlib=SAED90)[1]
+    lt = df.iopaths(c, tlib=NANGATE45)[1]
     nand_a = c.cells['nandgate'].ins[0]
     nand_b = c.cells['nandgate'].ins[1]
     and_a = c.cells['andgate'].ins[0]

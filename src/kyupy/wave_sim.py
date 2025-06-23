@@ -13,10 +13,11 @@ Two simulators are available: :py:class:`WaveSim` runs on the CPU, and the deriv
 """
 
 import math
+from collections import defaultdict
 
 import numpy as np
 
-from . import numba, cuda, sim, cdiv
+from . import log, numba, cuda, sim, cdiv, eng
 
 
 TMAX = np.float32(2 ** 127)
@@ -59,8 +60,8 @@ class WaveSim(sim.SimOps):
         self.delays = np.zeros((len(delays), self.c_locs_len, 2, 2), dtype=delays.dtype)
         self.delays[:, :delays.shape[1]] = delays
 
-        self.c = np.zeros((self.c_len, sims), dtype=np.float32) + TMAX
-        self.s = np.zeros((11, self.s_len, sims), dtype=np.float32)
+        self.c = np.full((self.c_len, self.sims), TMAX, dtype=np.float32)
+        self.s = np.zeros((11, self.s_len, self.sims), dtype=np.float32)
         """Information about the logic values and transitions around the sequential elements (flip-flops) and ports.
 
         The first 3 values are read by :py:func:`s_to_c`.
@@ -98,12 +99,24 @@ class WaveSim(sim.SimOps):
         self.simctl_int[0] = range(sims)  # unique seed for each sim by default, zero this to pick same delays for all sims.
         self.simctl_int[1] = 2  # random picking by default.
 
-        self.nbytes = sum([a.nbytes for a in (self.c, self.s, self.c_locs, self.c_caps, self.ops, self.simctl_int)])
+        self.simctl_float = np.zeros((1, sims), dtype=np.float32) + 1
+        """Float array for per-simulation delay configuration.
+
+        * ``simctl_float[0]`` factor to be multiplied with each delay (default=1.0).
+        """
+
+        self.e = np.zeros((self.c_locs_len, sims, 2), dtype=np.uint8)  # aux data for each line and sim
+
+        self.error_counts = np.zeros(self.s_len, dtype=np.uint32)  # number of capture errors by PPO
+        self.lsts = np.zeros(self.s_len, dtype=np.float32)  # LST by PPO
+        self.overflows = np.zeros(self.s_len, dtype=np.uint32)  # Overflows by PPO
+
+        self.nbytes = sum([a.nbytes for a in (self.c, self.s, self.e, self.c_locs, self.c_caps, self.ops, self.simctl_int, self.simctl_float)])
 
     def __repr__(self):
         dev = 'GPU' if hasattr(self.c, 'copy_to_host') else 'CPU'
         return f'{{name: "{self.circuit.name}", device: "{dev}", sims: {self.sims}, ops: {len(self.ops)}, ' + \
-               f'levels: {len(self.level_starts)}, nbytes: {self.nbytes}}}'
+               f'levels: {len(self.level_starts)}, nbytes: {eng(self.nbytes)}}}'
 
     def s_to_c(self):
         """Transfers values of sequential elements and primary inputs to the combinational portion.
@@ -116,7 +129,7 @@ class WaveSim(sim.SimOps):
         self.c[self.pippi_c_locs+1] = np.choose(cond, [TMAX, TMAX, sins[1], TMAX])
         self.c[self.pippi_c_locs+2] = TMAX
 
-    def c_prop(self, sims=None, seed=1):
+    def c_prop(self, sims=None, seed=1, delta=0):
         """Propagates all waveforms from the (pseudo) primary inputs to the (pseudo) primary outputs.
 
         :param sims: Number of parallel simulations to execute. If None, all available simulations are performed.
@@ -124,7 +137,7 @@ class WaveSim(sim.SimOps):
         """
         sims = min(sims or self.sims, self.sims)
         for op_start, op_stop in zip(self.level_starts, self.level_stops):
-            level_eval_cpu(self.ops, op_start, op_stop, self.c, self.c_locs, self.c_caps, self.abuf, 0, sims, self.delays, self.simctl_int, seed)
+            level_eval_cpu(self.ops, op_start, op_stop, self.c, self.c_locs, self.c_caps, self.e, self.abuf, 0, sims, self.delays, self.simctl_int, self.simctl_float, seed, delta)
 
     def c_to_s(self, time=TMAX, sd=0.0, seed=1):
         """Simulates a capture operation at all sequential elements and primary outputs.
@@ -152,7 +165,7 @@ class WaveSim(sim.SimOps):
         self.s[2, self.ppio_s_locs] = self.s[8, self.ppio_s_locs]
 
 
-def _wave_eval(op, cbuf, c_locs, c_caps, sim, delays, simctl_int, seed=0):
+def _wave_eval(op, cbuf, c_locs, c_caps, ebuf, sim, delays, simctl_int, simctl_float, seed, delta):
     overflows = int(0)
 
     lut = op[0]
@@ -161,6 +174,18 @@ def _wave_eval(op, cbuf, c_locs, c_caps, sim, delays, simctl_int, seed=0):
     b_idx = op[3]
     c_idx = op[4]
     d_idx = op[5]
+
+    input_epoch = (ebuf[a_idx, sim, 1]|
+                   ebuf[b_idx, sim, 1]|
+                   ebuf[c_idx, sim, 1]|
+                   ebuf[d_idx, sim, 1])
+
+    output_epoch = ebuf[z_idx, sim, 1]
+
+    if (delta):
+        if input_epoch == 0 and output_epoch == 0: return 0, 0
+
+    #out_changed = output_epoch
 
     if len(delays) > 1:
         if simctl_int[1] == 0:
@@ -174,6 +199,8 @@ def _wave_eval(op, cbuf, c_locs, c_caps, sim, delays, simctl_int, seed=0):
             delays = delays[_rnd % len(delays)]
     else:
         delays = delays[0]
+        
+    
 
     a_mem = c_locs[a_idx]
     b_mem = c_locs[b_idx]
@@ -192,10 +219,10 @@ def _wave_eval(op, cbuf, c_locs, c_caps, sim, delays, simctl_int, seed=0):
 
     z_val = z_cur
 
-    a = cbuf[a_mem + a_cur, sim] + delays[a_idx, 0, z_val]
-    b = cbuf[b_mem + b_cur, sim] + delays[b_idx, 0, z_val]
-    c = cbuf[c_mem + c_cur, sim] + delays[c_idx, 0, z_val]
-    d = cbuf[d_mem + d_cur, sim] + delays[d_idx, 0, z_val]
+    a = cbuf[a_mem + a_cur, sim] + delays[a_idx, 0, z_val] * simctl_float[0]
+    b = cbuf[b_mem + b_cur, sim] + delays[b_idx, 0, z_val] * simctl_float[0]
+    c = cbuf[c_mem + c_cur, sim] + delays[c_idx, 0, z_val] * simctl_float[0]
+    d = cbuf[d_mem + d_cur, sim] + delays[d_idx, 0, z_val] * simctl_float[0]
 
     previous_t = TMIN
 
@@ -206,27 +233,27 @@ def _wave_eval(op, cbuf, c_locs, c_caps, sim, delays, simctl_int, seed=0):
         if a == current_t:
             a_cur += 1
             inputs ^= 1
-            thresh = delays[a_idx, a_cur & 1, z_val]
-            a = cbuf[a_mem + a_cur, sim] + delays[a_idx, a_cur & 1, z_val]
-            next_t = cbuf[a_mem + a_cur, sim] + delays[a_idx, (a_cur & 1) ^ 1, z_val ^ 1]
+            thresh = delays[a_idx, a_cur & 1 ^ 1, z_val] * simctl_float[0]
+            a = cbuf[a_mem + a_cur, sim] + delays[a_idx, a_cur & 1, z_val] * simctl_float[0]
+            next_t = cbuf[a_mem + a_cur, sim] + delays[a_idx, (a_cur & 1) ^ 1, z_val ^ 1] * simctl_float[0]
         elif b == current_t:
             b_cur += 1
             inputs ^= 2
-            thresh = delays[b_idx, b_cur & 1, z_val]
-            b = cbuf[b_mem + b_cur, sim] + delays[b_idx, b_cur & 1, z_val]
-            next_t = cbuf[b_mem + b_cur, sim] + delays[b_idx, (b_cur & 1) ^ 1, z_val ^ 1]
+            thresh = delays[b_idx, b_cur & 1 ^ 1, z_val] * simctl_float[0]
+            b = cbuf[b_mem + b_cur, sim] + delays[b_idx, b_cur & 1, z_val] * simctl_float[0]
+            next_t = cbuf[b_mem + b_cur, sim] + delays[b_idx, (b_cur & 1) ^ 1, z_val ^ 1] * simctl_float[0]
         elif c == current_t:
             c_cur += 1
             inputs ^= 4
-            thresh = delays[c_idx, c_cur & 1, z_val]
-            c = cbuf[c_mem + c_cur, sim] + delays[c_idx, c_cur & 1, z_val]
-            next_t = cbuf[c_mem + c_cur, sim] + delays[c_idx, (c_cur & 1) ^ 1, z_val ^ 1]
+            thresh = delays[c_idx, c_cur & 1 ^ 1, z_val] * simctl_float[0]
+            c = cbuf[c_mem + c_cur, sim] + delays[c_idx, c_cur & 1, z_val] * simctl_float[0]
+            next_t = cbuf[c_mem + c_cur, sim] + delays[c_idx, (c_cur & 1) ^ 1, z_val ^ 1] * simctl_float[0]
         else:
             d_cur += 1
             inputs ^= 8
-            thresh = delays[d_idx, d_cur & 1, z_val]
-            d = cbuf[d_mem + d_cur, sim] + delays[d_idx, d_cur & 1, z_val]
-            next_t = cbuf[d_mem + d_cur, sim] + delays[d_idx, (d_cur & 1) ^ 1, z_val ^ 1]
+            thresh = delays[d_idx, d_cur & 1 ^ 1, z_val] * simctl_float[0]
+            d = cbuf[d_mem + d_cur, sim] + delays[d_idx, d_cur & 1, z_val] * simctl_float[0]
+            next_t = cbuf[d_mem + d_cur, sim] + delays[d_idx, (d_cur & 1) ^ 1, z_val ^ 1] * simctl_float[0]
 
         if (z_cur & 1) != ((lut >> inputs) & 1):
             # we generate an edge in z_mem, if ...
@@ -235,31 +262,44 @@ def _wave_eval(op, cbuf, c_locs, c_caps, sim, delays, simctl_int, seed=0):
                 or (current_t - previous_t) > thresh  # -OR- the generated hazard is wider than pulse threshold.
                 ):
                 if z_cur < (z_cap - 1):  # enough space in z_mem?
+                    #if delta and (cbuf[z_mem + z_cur, sim] != current_t):
+                    #    out_changed = 1
                     cbuf[z_mem + z_cur, sim] = current_t
                     previous_t = current_t
                     z_cur += 1
                 else:
                     overflows += 1
-                    previous_t = cbuf[z_mem + z_cur - 1, sim]
                     z_cur -= 1
+                    previous_t = cbuf[z_mem + z_cur, sim]
             else:
                 z_cur -= 1
                 previous_t = cbuf[z_mem + z_cur - 1, sim] if z_cur > 0 else TMIN
 
             # output value of cell changed. update all delayed inputs.
             z_val = z_val ^ 1
-            a = cbuf[a_mem + a_cur, sim] + delays[a_idx, a_cur & 1, z_val]
-            b = cbuf[b_mem + b_cur, sim] + delays[b_idx, b_cur & 1, z_val]
-            c = cbuf[c_mem + c_cur, sim] + delays[c_idx, c_cur & 1, z_val]
-            d = cbuf[d_mem + d_cur, sim] + delays[d_idx, d_cur & 1, z_val]
+            a = cbuf[a_mem + a_cur, sim] + delays[a_idx, a_cur & 1, z_val] * simctl_float[0]
+            b = cbuf[b_mem + b_cur, sim] + delays[b_idx, b_cur & 1, z_val] * simctl_float[0]
+            c = cbuf[c_mem + c_cur, sim] + delays[c_idx, c_cur & 1, z_val] * simctl_float[0]
+            d = cbuf[d_mem + d_cur, sim] + delays[d_idx, d_cur & 1, z_val] * simctl_float[0]
 
         current_t = min(a, b, c, d)
+
+    #if delta and (cbuf[z_mem + z_cur, sim] != TMAX):
+    #    out_changed = 1
 
     # generate or propagate overflow flag
     cbuf[z_mem + z_cur, sim] = TMAX_OVL if overflows > 0 else max(a, b, c, d)
 
     nrise = max(0, (z_cur+1) // 2 - (cbuf[z_mem, sim] == TMIN))
     nfall = z_cur // 2
+
+    e = int(((cbuf[z_mem, sim] == TMIN) << 1) & 2)  # initial value
+    e |= z_val  # final value
+    e |= (nrise + nfall)<<2  # number of transitions
+
+    ebuf[z_idx, sim, 0] = e
+
+    ebuf[z_idx, sim, 1] = input_epoch #& out_changed
 
     return nrise, nfall
 
@@ -268,11 +308,11 @@ wave_eval_cpu = numba.njit(_wave_eval)
 
 
 @numba.njit
-def level_eval_cpu(ops, op_start, op_stop, c, c_locs, c_caps, abuf, sim_start, sim_stop, delays, simctl_int, seed):
+def level_eval_cpu(ops, op_start, op_stop, c, c_locs, c_caps, ebuf, abuf, sim_start, sim_stop, delays, simctl_int, simctl_float, seed, delta):
     for op_idx in range(op_start, op_stop):
         op = ops[op_idx]
         for sim in range(sim_start, sim_stop):
-            nrise, nfall = wave_eval_cpu(op, c, c_locs, c_caps, sim, delays, simctl_int[:, sim], seed)
+            nrise, nfall = wave_eval_cpu(op, c, c_locs, c_caps, ebuf, sim, delays, simctl_int[:, sim], simctl_float[:, sim], seed, delta)
             a_loc = op[6]
             a_wr = op[7]
             a_wf = op[8]
@@ -344,32 +384,51 @@ class WaveSimCuda(WaveSim):
         self.c_caps = cuda.to_device(self.c_caps)
         self.delays = cuda.to_device(self.delays)
         self.simctl_int = cuda.to_device(self.simctl_int)
+        self.simctl_float = cuda.to_device(self.simctl_float)
         self.abuf = cuda.to_device(self.abuf)
+        self.e = cuda.to_device(self.e)
+        self.error_counts = cuda.to_device(self.error_counts)
+        self.lsts = cuda.to_device(self.lsts)
+        self.overflows = cuda.to_device(self.overflows)
+
+        self.aux = cuda.to_device(np.zeros(8*1024, dtype=np.int32))
 
         self._block_dim = (32, 16)
 
     def __getstate__(self):
         state = self.__dict__.copy()
-        state['c'] = np.array(self.c)
+        del state['c']
         state['s'] = np.array(self.s)
         state['ops'] = np.array(self.ops)
         state['c_locs'] = np.array(self.c_locs)
         state['c_caps'] = np.array(self.c_caps)
         state['delays'] = np.array(self.delays)
         state['simctl_int'] = np.array(self.simctl_int)
+        state['simctl_float'] = np.array(self.simctl_float)
         state['abuf'] = np.array(self.abuf)
+        state['e'] = np.array(self.e)
+        state['error_counts'] = np.array(self.error_counts)
+        state['lsts'] = np.array(self.lsts)
+        state['overflows'] = np.array(self.overflows)
+        state['aux'] = np.array(self.aux)
         return state
 
     def __setstate__(self, state):
         self.__dict__.update(state)
-        self.c = cuda.to_device(self.c)
+        self.c = cuda.to_device(np.full((self.c_len, self.sims), TMAX, dtype=np.float32))
         self.s = cuda.to_device(self.s)
         self.ops = cuda.to_device(self.ops)
         self.c_locs = cuda.to_device(self.c_locs)
         self.c_caps = cuda.to_device(self.c_caps)
         self.delays = cuda.to_device(self.delays)
         self.simctl_int = cuda.to_device(self.simctl_int)
+        self.simctl_float = cuda.to_device(self.simctl_float)
         self.abuf = cuda.to_device(self.abuf)
+        self.e = cuda.to_device(self.e)
+        self.error_counts = cuda.to_device(self.error_counts)
+        self.lsts = cuda.to_device(self.lsts)
+        self.overflows = cuda.to_device(self.overflows)
+        self.aux = cuda.to_device(self.aux)
 
     def s_to_c(self):
         grid_dim = self._grid_dim(self.sims, self.s_len)
@@ -377,13 +436,23 @@ class WaveSimCuda(WaveSim):
 
     def _grid_dim(self, x, y): return cdiv(x, self._block_dim[0]), cdiv(y, self._block_dim[1])
 
-    def c_prop(self, sims=None, seed=1):
+    def c_prop(self, sims=None, seed=1, op_from=0, op_to=None, delta=0):
         sims = min(sims or self.sims, self.sims)
         for op_start, op_stop in zip(self.level_starts, self.level_stops):
+            if op_from > op_start: continue
+            if op_to is not None and op_to <= op_start: break
             grid_dim = self._grid_dim(sims, op_stop - op_start)
-            wave_eval_gpu[grid_dim, self._block_dim](self.ops, op_start, op_stop, self.c, self.c_locs, self.c_caps, self.abuf, int(0),
-                sims, self.delays, self.simctl_int, seed)
+            wave_eval_gpu[grid_dim, self._block_dim](self.ops, op_start, op_stop, self.c, self.c_locs, self.c_caps, self.e, self.abuf, int(0),
+                sims, self.delays, self.simctl_int, self.simctl_float, seed, delta)
         cuda.synchronize()
+
+    def c_prop_level(self, level, sims=None, seed=1, delta=0):
+        sims = min(sims or self.sims, self.sims)
+        op_start = self.level_starts[level]
+        op_stop = self.level_stops[level]
+        grid_dim = self._grid_dim(sims, op_stop - op_start)
+        wave_eval_gpu[grid_dim, self._block_dim](self.ops, op_start, op_stop, self.c, self.c_locs, self.c_caps, self.e, self.abuf, int(0),
+            sims, self.delays, self.simctl_int, self.simctl_float, seed, delta)
 
     def c_to_s(self, time=TMAX, sd=0.0, seed=1):
         grid_dim = self._grid_dim(self.sims, self.s_len)
@@ -393,6 +462,77 @@ class WaveSimCuda(WaveSim):
     def s_ppo_to_ppi(self, time=0.0):
         grid_dim = self._grid_dim(self.sims, self.s_len)
         ppo_to_ppi_gpu[grid_dim, self._block_dim](self.s, self.c_locs, time, self.ppi_offset, self.ppo_offset)
+
+    def acc_error_counts(self, sims=None):
+        sims = min(sims or self.sims, self.sims)
+        grid_dim = cdiv(self.s_len, 256)
+        acc_error_counts_gpu[grid_dim, 256](self.s, sims, self.error_counts)
+
+    def reset_error_counts(self):
+        self.error_counts[:] = 0
+
+    def get_error_counts(self):
+        return np.array(self.error_counts)
+
+    def acc_overflows(self, sims=None):
+        sims = min(sims or self.sims, self.sims)
+        grid_dim = cdiv(self.s_len, 256)
+        acc_overflows_gpu[grid_dim, 256](self.s, sims, self.overflows)
+
+    def reset_overflows(self):
+        self.overflows[:] = 0
+
+    def get_overflows(self):
+        return np.array(self.overflows)
+
+    def acc_lsts(self, sims=None):
+        sims = min(sims or self.sims, self.sims)
+        grid_dim = cdiv(self.s_len, 256)
+        acc_lsts_gpu[grid_dim, 256](self.s, sims, self.lsts)
+
+    def reset_lsts(self):
+        self.lsts[:] = 0.0
+
+    def get_lsts(self):
+        return np.array(self.lsts)
+
+
+@cuda.jit()
+def memcpy_gpu (src, dst, nitems):
+    tid = cuda.grid(1)
+    stride = cuda.gridDim.x * cuda.blockDim.x
+    for i in range(tid, nitems, stride):
+        dst.flat[i] = src.flat[i]
+
+
+@cuda.jit()
+def acc_error_counts_gpu(s, sims, error_counts):
+    x = cuda.grid(1)
+    if x >= s.shape[1]: return
+    cnt = 0
+    for i in range(sims):
+        cnt += (s[6,x,i] != s[8,x,i])
+    error_counts[x] += cnt
+
+
+@cuda.jit()
+def acc_overflows_gpu(s, sims, overflows):
+    x = cuda.grid(1)
+    if x >= s.shape[1]: return
+    cnt = 0
+    for i in range(sims):
+        cnt += s[10,x,i]
+    overflows[x] += cnt
+
+
+@cuda.jit()
+def acc_lsts_gpu(s, sims, lsts):
+    x = cuda.grid(1)
+    if x >= s.shape[1]: return
+    lst = 0
+    for i in range(sims):
+        lst = max(lst, s[5,x,i])
+    lsts[x] = max(lsts[x], lst)
 
 
 @cuda.jit()
@@ -423,7 +563,7 @@ _wave_eval_gpu = cuda.jit(_wave_eval, device=True)
 
 
 @cuda.jit()
-def wave_eval_gpu(ops, op_start, op_stop, cbuf, c_locs, c_caps, abuf, sim_start, sim_stop, delays, simctl_int, seed):
+def wave_eval_gpu(ops, op_start, op_stop, cbuf, c_locs, c_caps, ebuf, abuf, sim_start, sim_stop, delays, simctl_int, simctl_float, seed, delta):
     x, y = cuda.grid(2)
     sim = sim_start + x
     op_idx = op_start + y
@@ -435,7 +575,7 @@ def wave_eval_gpu(ops, op_start, op_stop, cbuf, c_locs, c_caps, abuf, sim_start,
     a_wr = op[7]
     a_wf = op[8]
 
-    nrise, nfall = _wave_eval_gpu(op, cbuf, c_locs, c_caps, sim, delays, simctl_int[:, sim], seed)
+    nrise, nfall = _wave_eval_gpu(op, cbuf, c_locs, c_caps, ebuf, sim, delays, simctl_int[:, sim], simctl_float[:, sim], seed, delta)
 
     # accumulate WSA into abuf
     if a_loc >= 0:

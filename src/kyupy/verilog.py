@@ -73,7 +73,7 @@ class VerilogTransformer(Transformer):
         elif "'" in args[0]:
             width, rest = args[0].split("'")
             width = int(width)
-            base, const = rest[0], rest[1:]
+            base, const = rest[0], rest[1:].replace('x','0')
             const = int(const, {'b': 2, 'd':10, 'h':16}[base.lower()])
             l = []
             for _ in range(width):
@@ -91,6 +91,14 @@ class VerilogTransformer(Transformer):
             else:
                 sigs.append(a)
         return sigs
+
+    def ternaryif(self, args):
+        sel = args[0]
+        ctrue = args[1]
+        cfalse = args[2]
+        print(f"got ternary if {args[0]} {args[1]}")
+        
+        return args[1]
 
     def declaration(self, kind, args):
         rnge = None
@@ -123,6 +131,9 @@ class VerilogTransformer(Transformer):
         assignments = []
         for stmt in args[2:]:  # pass 1: instantiate cells and driven signals
             if isinstance(stmt, Instantiation):
+                if stmt.type not in self.tlib.cells:
+                    log.warn(f'Ignoring cell of unknown kind "{stmt.type}"')
+                    continue
                 n = Node(c, stmt.name, kind=stmt.type)
                 for p, s in stmt.pins.items():
                     if self.tlib.pin_is_output(n.kind, p):
@@ -141,35 +152,50 @@ class VerilogTransformer(Transformer):
                         c.io_nodes[positions[name]] = n
                     if sd.kind == 'input':
                         Line(c, n, Node(c, name))
-        for target, source in assignments:  # pass 1.5: process signal assignments
-            target_sigs = []
-            if not isinstance(target, list): target = [target]
-            for s in target:
-                if s in sig_decls:
-                    target_sigs += sig_decls[s].names
-                else:
-                    target_sigs.append(s)
-            source_sigs = []
-            if not isinstance(source, list): source = [source]
-            for s in source:
-                if s in sig_decls:
-                    source_sigs += sig_decls[s].names
-                else:
-                    source_sigs.append(s)
-            for t, s in zip(target_sigs, source_sigs):
-                if t in c.forks:
-                    assert s not in c.forks, 'assignment between two driven signals'
-                    Line(c, c.forks[t], Node(c, s))
-                elif s in c.forks:
-                    assert t not in c.forks, 'assignment between two driven signals'
-                    Line(c, c.forks[s], Node(c, t))
-                elif s.startswith("1'b"):
-                    cnode = Node(c, f'__const{s[3]}_{const_count}__', f'__const{s[3]}__')
-                    const_count += 1
-                    Line(c, cnode, Node(c, t))
+        deferred_assignments = set()
+        ignored = 0
+        while len(assignments) > 0:
+            more_assignments = []
+            for target, source in assignments:  # pass 1.5: process signal assignments
+                target_sigs = []
+                if not isinstance(target, list): target = [target]
+                for s in target:
+                    if s in sig_decls:
+                        target_sigs += sig_decls[s].names
+                    else:
+                        target_sigs.append(s)
+                source_sigs = []
+                if not isinstance(source, list): source = [source]
+                for s in source:
+                    if s in sig_decls:
+                        source_sigs += sig_decls[s].names
+                    else:
+                        source_sigs.append(s)
+                for t, s in zip(target_sigs, source_sigs):
+                    if t in c.forks:
+                        assert s not in c.forks, f'assignment between two driven signals: source={s} target={t}'
+                        Line(c, c.forks[t], Node(c, s))
+                    elif s in c.forks:
+                        assert t not in c.forks, 'assignment between two driven signals'
+                        Line(c, c.forks[s], Node(c, t))
+                    elif s.startswith("1'b"):
+                        cnode = Node(c, f'__const{s[3]}_{const_count}__', f'__const{s[3]}__')
+                        const_count += 1
+                        Line(c, cnode, Node(c, t))
+                    else:
+                        if (t, s) in deferred_assignments:
+                            #log.info(f'ignoring: assign {t} = {s}')
+                            ignored += 1
+                        else:
+                            more_assignments.append((t, s))
+                            deferred_assignments.add((t, s)) 
+            assignments = more_assignments
+        if ignored > 0:
+            log.warn(f'ignored {ignored} assignments')
         for stmt in args[2:]:  # pass 2: connect signals to readers
             if isinstance(stmt, Instantiation):
                 for p, s in stmt.pins.items():
+                    if stmt.name not in c.cells: continue
                     n = c.cells[stmt.name]
                     if self.tlib.pin_is_output(n.kind, p): continue
                     if s.startswith("1'b"):
@@ -221,10 +247,11 @@ GRAMMAR = r"""
     pin: namedpin | sigsel
     namedpin: "." name "(" sigsel? ")"
     range: "[" /[0-9]+/ (":" /[0-9]+/)? "]"
-    sigsel: name range? | concat
+    sigsel: name range? | concat | ternaryif
     concat: "{" sigsel ( "," sigsel )*  "}"
+    ternaryif: sigsel "?" sigsel ":" sigsel
     _namelist: name ( "," name )*
-    name: ( /[a-z_][a-z0-9_]*/i | /\\[^\t \r\n]+[\t \r\n]/i | /[0-9]+'[bdh][0-9a-f]+/i )
+    name: ( /[a-z_][a-z0-9_]*/i | /\\[^\t \r\n]+[\t \r\n]/i | /[0-9]+'[bdh][x0-9a-f]+/i )
     %import common.NEWLINE
     COMMENT: /\/\*(\*(?!\/)|[^*])*\*\// | /\(\*(\*(?!\))|[^*])*\*\)/ |  "//" /(.)*/ NEWLINE
     %ignore ( /\r?\n/ | COMMENT )+

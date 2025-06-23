@@ -10,20 +10,40 @@ Circuit graphs also define an ordering of inputs, outputs and other nodes to eas
 
 """
 
+from __future__ import annotations
+
 from collections import deque, defaultdict
 import re
+from typing import Union
 
 import numpy as np
 
 
 class GrowingList(list):
     def __setitem__(self, index, value):
-        if index >= len(self):
-            self.extend([None] * (index + 1 - len(self)))
+        if value is None: self.has_nones = True
+        if index == len(self): return super().append(value)
+        if index > len(self):
+            super().extend([None] * (index + 1 - len(self)))
+            self.has_nones = True
         super().__setitem__(index, value)
 
-    def free_index(self):
-        return next((i for i, x in enumerate(self) if x is None), len(self))
+    def __getitem__(self, index):
+        if isinstance(index, slice): return super().__getitem__(index)
+        return super().__getitem__(index) if index < len(self) else None
+
+    @property
+    def free_idx(self):
+        fi = len(self)
+        if hasattr(self, 'has_nones') and self.has_nones:
+            fi = next((i for i, x in enumerate(self) if x is None), len(self))
+            self.has_nones = fi < len(self)
+        return fi
+
+    def without_nones(self):
+        for item in self:
+            if item is not None:
+                yield item
 
 
 class IndexList(list):
@@ -76,10 +96,10 @@ class Node:
         by allocating an array or list :code:`my_data` of length :code:`len(n.circuit.nodes)` and
         accessing it by :code:`my_data[n.index]` or simply by :code:`my_data[n]`.
         """
-        self.ins = GrowingList()
+        self.ins: GrowingList[Line] = GrowingList()
         """A list of input connections (:class:`Line` objects).
         """
-        self.outs = GrowingList()
+        self.outs: GrowingList[Line] = GrowingList()
         """A list of output connections (:class:`Line` objects).
         """
 
@@ -135,7 +155,7 @@ class Line:
     Use the explicit case only if connections to specific pins are required.
     It may overwrite any previous line references in the connection list of the nodes.
     """
-    def __init__(self, circuit, driver, reader):
+    def __init__(self, circuit: Circuit, driver: Union[Node, tuple[Node, int]], reader: Union[Node, tuple[Node, int]]):
         self.circuit = circuit
         """The :class:`Circuit` object the line is part of.
         """
@@ -147,7 +167,7 @@ class Line:
         by allocating an array or list :code:`my_data` of length :code:`len(l.circuit.lines)` and
         accessing it by :code:`my_data[l.index]` or simply by :code:`my_data[l]`.
         """
-        if not isinstance(driver, tuple): driver = (driver, driver.outs.free_index())
+        if not isinstance(driver, tuple): driver = (driver, driver.outs.free_idx)
         self.driver = driver[0]
         """The :class:`Node` object that drives this line.
         """
@@ -157,7 +177,7 @@ class Line:
         This is the position in the list :py:attr:`Node.outs` of the driving node this line referenced from:
         :code:`self.driver.outs[self.driver_pin] == self`.
         """
-        if not isinstance(reader, tuple): reader = (reader, reader.ins.free_index())
+        if not isinstance(reader, tuple): reader = (reader, reader.ins.free_idx)
         self.reader = reader[0]
         """The :class:`Node` object that reads this line.
         """
@@ -292,7 +312,7 @@ class Circuit:
     def _locs(self, prefix, nodes):
         d_top = dict()
         for i, n in enumerate(nodes):
-            if m := re.match(fr'({prefix}.*?)((?:[\d_\[\]])*$)', n.name):
+            if m := re.match(fr'({re.escape(prefix)}.*?)((?:[\d_\[\]])*$)', n.name):
                 path = [m[1]] + [int(v) for v in re.split(r'[_\[\]]+', m[2]) if len(v) > 0]
                 d = d_top
                 for j in path[:-1]:
@@ -334,15 +354,16 @@ class Circuit:
     def get_or_add_fork(self, name):
         return self.forks[name] if name in self.forks else Node(self, name)
 
-    def remove_dangling_nodes(self, root_node:Node):
+    def remove_dangling_nodes(self, root_node:Node, keep=[]):
         if len([l for l in root_node.outs if l is not None]) > 0: return
         lines = [l for l in root_node.ins if l is not None]
         drivers = [l.driver for l in lines]
+        if root_node in keep: return
         root_node.remove()
         for l in lines:
             l.remove()
         for d in drivers:
-            self.remove_dangling_nodes(d)
+            self.remove_dangling_nodes(d, keep=keep)
 
     def eliminate_1to1_forks(self):
         """Removes all forks that drive only one node.
@@ -369,6 +390,21 @@ class Circuit:
             in_line.reader = out_reader
             in_line.reader_pin = out_reader_pin
             in_line.reader.ins[in_line.reader_pin] = in_line
+
+    def remove_forks(self):
+        ios = set(self.io_nodes)
+        for n in list(self.forks.values()):
+            if n in ios: continue
+            d = None
+            if (l := n.ins[0]) is not None:
+                d = l.driver
+                l.remove()
+            for l in list(n.outs):
+                if l is None: continue
+                r, rp = l.reader, l.reader_pin
+                l.remove()
+                if d is not None: Line(self, d, (r, rp))
+            n.remove()
 
     def substitute(self, node, impl):
         """Replaces a given node with the given implementation circuit.
@@ -428,7 +464,7 @@ class Circuit:
         for l, ll in zip(impl_out_lines, node_out_lines):  # connect outputs
             if ll is None:
                 if l.driver in node_map:
-                    self.remove_dangling_nodes(node_map[l.driver])
+                    self.remove_dangling_nodes(node_map[l.driver], keep=ios)
                 continue
             if len(l.reader.outs) > 0:  # output is also read by impl. circuit, connect to fork.
                 ll.driver = node_map[l.reader]
@@ -446,6 +482,21 @@ class Circuit:
         for n in list(self.nodes):
             if n.kind in tlib.cells:
                 self.substitute(n, tlib.cells[n.kind][0])
+
+    def remove_constants(self):
+        c1gen = None
+        for n in self.nodes:
+            if n.kind == '__const0__':  # just remove, unconnected inputs are defined 0.
+                for l in n.outs:
+                    l.remove()
+                n.remove()
+            elif n.kind == '__const1__':
+                if c1gen is None: c1gen = Node(self, '__const1gen__', 'INV1')  # one unique const 1 generator
+                for l in n.outs:
+                    r, rp = l.reader, l.reader_pin
+                    l.remove()
+                    Line(self, c1gen, (r, rp))
+                n.remove()
 
     def copy(self):
         """Returns a deep copy of the circuit.
@@ -501,14 +552,15 @@ class Circuit:
         substrings 'dff' or 'latch' are yielded first.
         """
         visit_count = np.zeros(len(self.nodes), dtype=np.uint32)
-        queue = deque(n for n in self.nodes if len(n.ins) == 0 or 'dff' in n.kind.lower() or 'latch' in n.kind.lower())
+        start = set(n for n in self.nodes if len(n.ins) == 0 or 'dff' in n.kind.lower() or 'latch' in n.kind.lower())
+        queue = deque(start)
         while len(queue) > 0:
             n = queue.popleft()
             for line in n.outs:
                 if line is None: continue
                 succ = line.reader
                 visit_count[succ] += 1
-                if visit_count[succ] == len(succ.ins) and 'dff' not in succ.kind.lower() and 'latch' not in succ.kind.lower():
+                if visit_count[succ] == len(succ.ins) and succ not in start:
                     queue.append(succ)
             yield n
 
@@ -560,6 +612,21 @@ class Circuit:
                 for line in n.outs:
                     if line is not None:
                         marks[n] |= marks[line.reader]
+            if marks[n]:
+                yield n
+
+    def fanout(self, origin_nodes):
+        """Generator function to iterate over the fan-out cone of a given list of origin nodes.
+
+        Nodes are yielded in topological order.
+        """
+        marks = [False] * len(self.nodes)
+        for n in origin_nodes:
+            marks[n] = True
+        for n in self.topological_order():
+            if not marks[n]:
+                for line in n.ins.without_nones():
+                    marks[n] |= marks[line.driver]
             if marks[n]:
                 yield n
 

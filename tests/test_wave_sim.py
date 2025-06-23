@@ -5,22 +5,56 @@ from kyupy.logic_sim import LogicSim
 from kyupy import logic, bench, sim
 from kyupy.logic import mvarray
 
+def test_xnor2_delays():
+    op = (sim.XNOR2, 2, 0, 1, 3, 3, -1, 0, 0)
+    #op = (0b0111, 4, 0, 1)
+    c = np.full((4*16, 1), TMAX, dtype=np.float32)  # 4 waveforms of capacity 16
+    c_locs = np.zeros((4,), dtype='int')
+    c_caps = np.zeros((4,), dtype='int')
+    ebuf = np.zeros((4, 1, 2), dtype=np.int32)
+
+    for i in range(4): c_locs[i], c_caps[i] = i*16, 16  # 1:1 mapping
+    delays = np.zeros((1, 4, 2, 2))
+    delays[0, 0, 0, 0] = 0.031  # A rise -> Z rise
+    delays[0, 0, 0, 1] = 0.027  # A rise -> Z fall
+    delays[0, 0, 1, 0] = 0.033  # A fall -> Z rise
+    delays[0, 0, 1, 1] = 0.037  # A fall -> Z fall
+    delays[0, 1, 0, 0] = 0.032  # B rise -> Z rise
+    delays[0, 1, 0, 1] = 0.030  # B rise -> Z fall
+    delays[0, 1, 1, 0] = 0.038  # B fall -> Z rise
+    delays[0, 1, 1, 1] = 0.036  # B fall -> Z fall
+
+    simctl_int = np.asarray([0], dtype=np.int32)
+
+    def wave_assert(inputs, output):
+        for i, a in zip(inputs, c.reshape(-1,16)): a[:len(i)] = i
+        wave_eval_cpu(op, c, c_locs, c_caps, ebuf, 0, delays, simctl_int, 0, 0)
+        for i, v in enumerate(output): np.testing.assert_allclose(c.reshape(-1,16)[2,i], v)
+
+    wave_assert([[TMIN,TMAX],[TMIN,TMAX]], [TMIN,TMAX])      # XNOR(1,1) => 1
+    wave_assert([[TMAX,TMAX],[TMIN,TMAX]], [TMAX])           # XNOR(0,1) => 0
+    # using Afall/Zfall for pulse length, bug: was using Arise/Zfall
+    #wave_assert([[0.07, 0.10, TMAX], [0.0, TMAX]], [TMIN, 0.03, 0.101, 0.137, TMAX])
+    wave_assert([[0.07, 0.10, TMAX], [0.0, TMAX]], [TMIN, 0.03, TMAX])
+    wave_assert([[0.06, 0.10, TMAX], [0.0, TMAX]], [TMIN, 0.03, 0.091, 0.137, TMAX])
+
 def test_nand_delays():
     op = (sim.NAND4, 4, 0, 1, 2, 3, -1, 0, 0)
     #op = (0b0111, 4, 0, 1)
-    c = np.full((5*16, 1), TMAX)  # 5 waveforms of capacity 16
+    c = np.full((5*16, 1), TMAX, dtype=np.float32)  # 5 waveforms of capacity 16
     c_locs = np.zeros((5,), dtype='int')
     c_caps = np.zeros((5,), dtype='int')
+    ebuf = np.zeros((4, 1, 2), dtype=np.int32)
 
     for i in range(5): c_locs[i], c_caps[i] = i*16, 16  # 1:1 mapping
 
     # SDF specifies IOPATH delays with respect to output polarity
     # SDF pulse rejection value is determined by IOPATH causing last transition and polarity of last transition
     delays = np.zeros((1, 5, 2, 2))
-    delays[0, 0, 0, 0] = 0.1  # A -> Z rise delay
-    delays[0, 0, 0, 1] = 0.2  # A -> Z fall delay
-    delays[0, 0, 1, 0] = 0.1  # A -> Z negative pulse limit (terminate in rising Z)
-    delays[0, 0, 1, 1] = 0.2  # A -> Z positive pulse limit
+    delays[0, 0, 0, 0] = 0.1  # A rise -> Z rise
+    delays[0, 0, 0, 1] = 0.2  # A rise -> Z fall
+    delays[0, 0, 1, 0] = 0.1  # A fall -> Z rise
+    delays[0, 0, 1, 1] = 0.2  # A fall -> Z fall
     delays[0, 1, :, 0] = 0.3  # as above for B -> Z
     delays[0, 1, :, 1] = 0.4
     delays[0, 2, :, 0] = 0.5  # as above for C -> Z
@@ -32,7 +66,7 @@ def test_nand_delays():
 
     def wave_assert(inputs, output):
         for i, a in zip(inputs, c.reshape(-1,16)): a[:len(i)] = i
-        wave_eval_cpu(op, c, c_locs, c_caps, 0, delays, simctl_int)
+        wave_eval_cpu(op, c, c_locs, c_caps, ebuf, 0, delays, simctl_int, 0, 0)
         for i, v in enumerate(output): np.testing.assert_allclose(c.reshape(-1,16)[4,i], v)
 
     wave_assert([[TMAX,TMAX],[TMAX,TMAX],[TMIN,TMAX],[TMIN,TMAX]], [TMIN,TMAX]) # NAND(0,0,1,1) => 1
@@ -145,7 +179,7 @@ def compare_to_logic_sim(wsim: WaveSim):
     lsim.s_to_c()
     lsim.c_prop()
     lsim.c_to_s()
-    exp = logic.bp_to_mv(lsim.s[1])
+    exp = logic.bp_to_mv(lsim.s[1])[:,:tests.shape[-1]]
 
     resp[resp == logic.PPULSE] = logic.ZERO
     resp[resp == logic.NPULSE] = logic.ONE
@@ -156,13 +190,13 @@ def compare_to_logic_sim(wsim: WaveSim):
     np.testing.assert_allclose(resp, exp)
 
 
-def test_b15(b15_2ig_circuit, b15_2ig_delays):
-    compare_to_logic_sim(WaveSim(b15_2ig_circuit, b15_2ig_delays, 8))
+def test_b15(b15_2ig_circuit_resolved, b15_2ig_delays):
+    compare_to_logic_sim(WaveSim(b15_2ig_circuit_resolved, b15_2ig_delays, 8))
 
 
-def test_b15_strip_forks(b15_2ig_circuit, b15_2ig_delays):
-    compare_to_logic_sim(WaveSim(b15_2ig_circuit, b15_2ig_delays, 8, strip_forks=True))
+def test_b15_strip_forks(b15_2ig_circuit_resolved, b15_2ig_delays):
+    compare_to_logic_sim(WaveSim(b15_2ig_circuit_resolved, b15_2ig_delays, 8, strip_forks=True))
 
 
-def test_b15_cuda(b15_2ig_circuit, b15_2ig_delays):
-    compare_to_logic_sim(WaveSimCuda(b15_2ig_circuit, b15_2ig_delays, 8, strip_forks=True))
+def test_b15_cuda(b15_2ig_circuit_resolved, b15_2ig_delays):
+    compare_to_logic_sim(WaveSimCuda(b15_2ig_circuit_resolved, b15_2ig_delays, 8, strip_forks=True))

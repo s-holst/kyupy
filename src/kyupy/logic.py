@@ -241,6 +241,8 @@ def mv_latch(d, t, q_prev, out=None):
 def mv_transition(init, final, out=None):
     """Computes the logic transitions from the initial values of ``init`` to the final values of ``final``.
     Pulses in the input data are ignored. If any of the inputs are ``UNKNOWN``, the result is ``UNKNOWN``.
+    If init is ``UNASSIGNED``, the result is the final value of ``final``.
+    If final is ``UNASSIGNED``, the result is the initial value of ``init``.
     If both inputs are ``UNASSIGNED``, the result is ``UNASSIGNED``.
 
     :param init: A multi-valued array.
@@ -251,7 +253,9 @@ def mv_transition(init, final, out=None):
     out = out or np.empty(np.broadcast(init, final).shape, dtype=np.uint8)
     out[...] = (init & 0b010) | (final & 0b001)
     out[...] |= ((out << 1) ^ (out << 2)) & 0b100
-    unknown = (init == UNKNOWN) | (init == UNASSIGNED) | (final == UNKNOWN) | (final == UNASSIGNED)
+    out[...] = np.choose(init == UNASSIGNED, [out, (final & 0b001) * ONE])
+    out[...] = np.choose(final == UNASSIGNED, [out, ((init & 0b010) >> 1) * ONE])
+    unknown = (init == UNKNOWN) | (final == UNKNOWN)
     unassigned = (init == UNASSIGNED) & (final == UNASSIGNED)
     np.putmask(out, unknown, UNKNOWN)
     np.putmask(out, unassigned, UNASSIGNED)
@@ -263,6 +267,18 @@ def mv_to_bp(mva):
     """
     if mva.ndim == 1: mva = mva[..., np.newaxis]
     return np.packbits(unpackbits(mva)[...,:3], axis=-2, bitorder='little').swapaxes(-1,-2)
+
+
+def mv_init(mva):
+    """Returns the initial binary values for mva.
+    """
+    return (mva>>1) & ((mva>>2)|mva) & 1
+
+
+def mv_final(mva):
+    """Returns the final binary value of mva.
+    """
+    return mva & ((mva>>2)|(mva>>1)) & 1
 
 
 def bparray(*a):

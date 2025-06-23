@@ -1,6 +1,6 @@
 import numpy as np
 
-from kyupy.logic_sim import LogicSim
+from kyupy.logic_sim import LogicSim, LogicSim6V
 from kyupy import bench, logic, sim
 from kyupy.logic import mvarray, bparray, bp_to_mv, mv_to_bp
 
@@ -94,6 +94,30 @@ def test_4v():
         '--0XX', '--X1X', '--XXX', '--XXX'))
 
 
+def test_6v():
+    c = bench.parse('input(x, y) output(a, o, n, xo, no) a=AND2(x,y) o=OR2(x,y) n=INV1(x) xo=XOR2(x,y) no=NOR2(x,y)')
+    s = LogicSim6V(c, 36)
+    assert s.s_len == 7
+    mva = mvarray(
+        '0000101', '0101110', '0R0R1RF', '0F0F1FR', '0P0P1PN', '0N0N1NP',
+        '1001010', '1111000', '1RR10F0', '1FF10R0', '1PP10N0', '1NN10P0',
+        'R00RFRF', 'R1R1FF0', 'RRRRFPF', 'RFPNFNP', 'RPPRFRF', 'RNRNFFP',
+        'F00FRFR', 'F1F1RR0', 'FRPNRNP', 'FFFFRPR', 'FPPFRFR', 'FNFNRRP',
+        'P00PNPN', 'P1P1NN0', 'PRPRNRF', 'PFPFNFR', 'PPPPNPN', 'PNPNNNP',
+        'N00NPNP', 'N1N1PP0', 'NRRNPFP', 'NFFNPRP', 'NPPNPNP', 'NNNNPPP')
+    tests = np.copy(mva)
+    tests[2:] = logic.ZERO
+    s.s[0] = tests
+    s.s_to_c()
+    s.c_prop()
+    s.c_to_s()
+    resp = s.s[1].copy()
+
+    exp_resp = np.copy(mva)
+    exp_resp[:2] = logic.ZERO
+    np.testing.assert_allclose(resp, exp_resp)
+
+
 def test_8v():
     c = bench.parse('input(x, y) output(a, o, n, xo) a=and(x,y) o=or(x,y) n=not(x) xo=xor(x,y)')
     s = LogicSim(c, 64, m=8)
@@ -173,3 +197,64 @@ def test_b01(mydir):
     s.c_prop()
     s.c_to_s()
     bp_to_mv(s.s[1])
+
+
+def sim_and_compare(c, test_resp, m=8):
+    tests, resp = test_resp
+    lsim = LogicSim(c, m=m, sims=tests.shape[1])
+    lsim.s[0] = logic.mv_to_bp(tests)
+    lsim.s_to_c()
+    lsim.c_prop()
+    lsim.c_to_s()
+    resp_sim = logic.bp_to_mv(lsim.s[1])[:,:tests.shape[1]]
+    idxs, pats = np.nonzero(((resp == logic.ONE) & (resp_sim != logic.ONE)) | ((resp == logic.ZERO) & (resp_sim != logic.ZERO)))
+    for i, (idx, pat) in enumerate(zip(idxs, pats)):
+        if i >= 10:
+            print(f'...')
+            break
+        print(f'mismatch pattern:{pat} ppio:{idx} exp:{logic.mv_str(resp[idx,pat])} act:{logic.mv_str(resp_sim[idx,pat])}')
+    assert len(idxs) == 0
+
+def sim_and_compare_6v(c, test_resp):
+    tests, resp = test_resp
+    lsim = LogicSim6V(c, sims=tests.shape[1])
+    lsim.s[0] = tests
+    lsim.s_to_c()
+    lsim.c_prop()
+    lsim.c_to_s()
+    resp_sim = lsim.s[1]
+    idxs, pats = np.nonzero(((resp == logic.ONE) & (resp_sim != logic.ONE)) | ((resp == logic.ZERO) & (resp_sim != logic.ZERO)))
+    for i, (idx, pat) in enumerate(zip(idxs, pats)):
+        if i >= 10:
+            print(f'...')
+            break
+        print(f'mismatch pattern:{pat} ppio:{idx} exp:{logic.mv_str(resp[idx,pat])} act:{logic.mv_str(resp_sim[idx,pat])}')
+    assert len(idxs) == 0
+
+
+def test_b15_2ig_sa_2v(b15_2ig_circuit_resolved, b15_2ig_sa_nf_test_resp):
+    sim_and_compare(b15_2ig_circuit_resolved, b15_2ig_sa_nf_test_resp, m=2)
+
+
+def test_b15_2ig_sa_4v(b15_2ig_circuit_resolved, b15_2ig_sa_nf_test_resp):
+    sim_and_compare(b15_2ig_circuit_resolved, b15_2ig_sa_nf_test_resp, m=4)
+
+
+def test_b15_2ig_sa_6v(b15_2ig_circuit_resolved, b15_2ig_sa_nf_test_resp):
+    sim_and_compare_6v(b15_2ig_circuit_resolved, b15_2ig_sa_nf_test_resp)
+
+
+def test_b15_2ig_sa_8v(b15_2ig_circuit_resolved, b15_2ig_sa_nf_test_resp):
+    sim_and_compare(b15_2ig_circuit_resolved, b15_2ig_sa_nf_test_resp, m=8)
+
+
+def test_b15_4ig_sa_2v(b15_4ig_circuit_resolved, b15_4ig_sa_rf_test_resp):
+    sim_and_compare(b15_4ig_circuit_resolved, b15_4ig_sa_rf_test_resp, m=2)
+
+
+def test_b15_4ig_sa_4v(b15_4ig_circuit_resolved, b15_4ig_sa_rf_test_resp):
+    sim_and_compare(b15_4ig_circuit_resolved, b15_4ig_sa_rf_test_resp, m=4)
+
+
+def test_b15_4ig_sa_8v(b15_4ig_circuit_resolved, b15_4ig_sa_rf_test_resp):
+    sim_and_compare(b15_4ig_circuit_resolved, b15_4ig_sa_rf_test_resp, m=8)

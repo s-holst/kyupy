@@ -57,6 +57,18 @@ def hr_bytes(nbytes):
         multiplier += 1
     return f'{nbytes:.1f}{["", "ki", "Mi", "Gi", "Ti", "Pi"][multiplier]}B'
 
+def eng(number):
+    """Formats a given number using engineering notation."""
+    exponent = 0
+    if abs(number) < 1:
+        while abs(number) >= 1000:
+            number *= 1000
+            exponent -= 3
+    else:
+        while abs(number) >= 1000:
+            number /= 1000
+            exponent += 3
+    return f'{number:.0f}' + (f'e{exponent}' if exponent != 0 else '')
 
 def hr_time(seconds):
     """Formats a given time interval for human readability."""
@@ -138,10 +150,10 @@ class Log:
         self._limit = limit
 
     def stop_limit(self):
-        if self.filtered > 0:
-            log.info(f'{self.filtered} more messages (filtered).')
-            self.filtered = 0
         self._limit = -1
+        if self.filtered > 0:
+            self.info(f'{self.filtered} more messages (filtered).')
+            self.filtered = 0
 
     def __getstate__(self):
         return {'elapsed': time.perf_counter() - self.start}
@@ -149,6 +161,8 @@ class Log:
     def __setstate__(self, state):
         self.logfile = sys.stdout
         self.indent = 0
+        self._limit = -1
+        self.filtered = 0
         self.start = time.perf_counter() - state['elapsed']
 
     def write(self, s, indent=0):
@@ -169,7 +183,7 @@ class Log:
             return
         t = time.perf_counter() - self.start
         self.logfile.write(f'# {t:011.3f} {level} {message}\n')
-        self.logfile.flush()
+        #self.logfile.flush()
         self._limit -= 1
 
     def info(self, message):

@@ -4,8 +4,13 @@ from bisect import bisect, insort_left
 
 import numpy as np
 
+from .circuit import Circuit
+
 BUF1 = np.uint16(0b1010_1010_1010_1010)
 INV1 = ~BUF1
+
+__const0__ = BUF1
+__const1__ = INV1
 
 AND2 = np.uint16(0b1000_1000_1000_1000)
 AND3 = np.uint16(0b1000_0000_1000_0000)
@@ -39,7 +44,10 @@ AOI211, OAI211 = ~AO211, ~OA211
 
 MUX21 = np.uint16(0b1100_1010_1100_1010)  # z = i1 if i2 else i0 (i2 is select)
 
-names = dict([(v, k) for k, v in globals().items() if isinstance(v, np.uint16)])
+names = dict([(v, k) for k, v in globals().items() if isinstance(v, np.uint16) and '__' not in k])
+
+prim2name = dict([(v, k) for k, v in globals().items() if isinstance(v, np.uint16) and '__' not in k])
+name2prim = dict([(k, v) for k, v in globals().items() if isinstance(v, np.uint16)])
 
 kind_prefixes = {
     'nand': (NAND4, NAND3, NAND2),
@@ -156,7 +164,7 @@ class SimOps:
     :param c_reuse: If enabled, memory of intermediate signal waveforms will be re-used. This greatly reduces
         memory footprint, but intermediate signal waveforms become unaccessible after a propagation.
     """
-    def __init__(self, circuit, c_caps=1, c_caps_min=1, a_ctrl=None, c_reuse=False, strip_forks=False):
+    def __init__(self, circuit: Circuit, c_caps=1, c_caps_min=1, a_ctrl=None, c_reuse=False, strip_forks=False):
         self.circuit = circuit
         self.s_len = len(circuit.s_nodes)
 
@@ -175,84 +183,74 @@ class SimOps:
         self.ppo_offset = self.ppi_offset + self.s_len
         self.c_locs_len = self.ppo_offset + self.s_len
 
-        # translate circuit structure into self.ops
-        ops = []
-        interface_dict = dict((n, i) for i, n in enumerate(circuit.s_nodes))
-        for n in circuit.topological_order():
-            if n in interface_dict:
-                inp_idx = self.ppi_offset + interface_dict[n]
-                if len(n.outs) > 0 and n.outs[0] is not None:  # first output of a PI/PPI
-                    ops.append((BUF1, n.outs[0].index, inp_idx, self.zero_idx, self.zero_idx, self.zero_idx, *a_ctrl[n.outs[0]]))
-                if 'dff' in n.kind.lower():  # second output of DFF is inverted
-                    if len(n.outs) > 1 and n.outs[1] is not None:
-                        ops.append((INV1, n.outs[1].index, inp_idx, self.zero_idx, self.zero_idx, self.zero_idx, *a_ctrl[n.outs[1]]))
-                else:  # if not DFF, no output is inverted.
-                    for o_line in n.outs[1:]:
-                        if o_line is not None:
-                            ops.append((BUF1, o_line.index, inp_idx, self.zero_idx, self.zero_idx, self.zero_idx, *a_ctrl[o_line]))
-                continue
-            # regular node, not PI/PPI or PO/PPO
-            o0_idx = n.outs[0].index if len(n.outs) > 0 and n.outs[0] is not None else self.tmp_idx
-            i0_idx = n.ins[0].index if len(n.ins) > 0 and n.ins[0] is not None else self.zero_idx
-            i1_idx = n.ins[1].index if len(n.ins) > 1 and n.ins[1] is not None else self.zero_idx
-            i2_idx = n.ins[2].index if len(n.ins) > 2 and n.ins[2] is not None else self.zero_idx
-            i3_idx = n.ins[3].index if len(n.ins) > 3 and n.ins[3] is not None else self.zero_idx
-            kind = n.kind.lower()
-            if kind == '__fork__':
-                if not strip_forks:
-                    for o_line in n.outs:
-                        if o_line is not None:
-                            ops.append((BUF1, o_line.index, i0_idx, i1_idx, i2_idx, i3_idx, *a_ctrl[o_line]))
-                continue
-            sp = None
-            for prefix, prims in kind_prefixes.items():
-                if kind.startswith(prefix):
-                    sp = prims[0]
-                    if i3_idx == self.zero_idx:
-                        sp = prims[1]
-                        if i2_idx == self.zero_idx:
-                            sp = prims[2]
-                    break
-            if sp is None:
-                print('unknown cell type', kind)
-            else:
-                ops.append((sp, o0_idx, i0_idx, i1_idx, i2_idx, i3_idx, *a_ctrl[o0_idx]))
+        # ALAP-toposort the circuit into self.ops
+        levels = []
 
-        self.ops = np.asarray(ops, dtype='int32')
+        ppio2idx = dict((n, i) for i, n in enumerate(circuit.s_nodes))
+        ppos = set([n for n in circuit.s_nodes if len(n.ins) > 0])
+        readers = np.array([1 if l.reader in ppos else len(l.reader.outs) for l in circuit.lines], dtype=np.int32)  # for ref-counting forks
+
+        level_lines = [n.ins[0] for n in ppos]  # start from PPOs
+        # FIXME: Should probably instanciate buffers for PPOs and attach DFF clocks
+
+        while len(level_lines) > 0:  # traverse the circuit level-wise back towards (P)PIs
+            level_ops = []
+            prev_level_lines = []
+
+            for l in level_lines:
+                n = l.driver
+                in_idxs = [n.ins[x].index if len(n.ins) > x and n.ins[x] is not None else self.zero_idx for x in [0,1,2,3]]
+                if n in ppio2idx:
+                    in_idxs[0] = self.ppi_offset + ppio2idx[n]
+                    if l.driver_pin == 1 and 'dff' in n.kind.lower():  # second output of DFF is inverted
+                        level_ops.append((INV1, l.index, *in_idxs, *a_ctrl[l]))
+                    else:
+                        level_ops.append((BUF1, l.index, *in_idxs, *a_ctrl[l]))
+                elif n.kind == '__fork__':
+                    readers[n.ins[0]] -= 1
+                    if readers[n.ins[0]] == 0: prev_level_lines.append(n.ins[0])
+                    if not strip_forks: level_ops.append((BUF1, l.index, *in_idxs, *a_ctrl[l]))
+                else:
+                    prev_level_lines += n.ins
+                    sp = None
+                    kind = n.kind.lower()
+                    for prefix, prims in kind_prefixes.items():
+                        if kind.startswith(prefix):
+                            sp = prims[0]
+                            if in_idxs[3] == self.zero_idx:
+                                sp = prims[1]
+                                if in_idxs[2] == self.zero_idx:
+                                    sp = prims[2]
+                            break
+                    if sp is None:
+                        print('unknown cell type', kind)
+                    else:
+                        level_ops.append((sp, l.index, *in_idxs, *a_ctrl[l]))
+
+            if len(level_ops) > 0: levels.append(level_ops)
+            level_lines = prev_level_lines
+
+        self.levels = [np.asarray(lv, dtype=np.int32) for lv in levels[::-1]]
+        level_sums = np.cumsum([0]+[len(lv) for lv in self.levels], dtype=np.int32)
+        self.level_starts, self.level_stops = level_sums[:-1], level_sums[1:]
+        self.ops = np.vstack(self.levels)
 
         # create a map from fanout lines to stem lines for fork stripping
-        stems = np.zeros(self.c_locs_len, dtype='int32') - 1  # default to -1: 'no fanout line'
+        stems = np.full(self.c_locs_len, -1, dtype=np.int32)  # default to -1: 'no fanout line'
         if strip_forks:
             for f in circuit.forks.values():
                 prev_line = f.ins[0]
                 while prev_line.driver.kind == '__fork__':
                     prev_line = prev_line.driver.ins[0]
-                stem_idx = prev_line.index
                 for ol in f.outs:
                     if ol is not None:
-                        stems[ol] = stem_idx
+                        stems[ol] = prev_line.index
 
-        # calculate level (distance from PI/PPI) and reference count for each line
-        levels = np.zeros(self.c_locs_len, dtype='int32')
-        ref_count = np.zeros(self.c_locs_len, dtype='int32')
-        level_starts = [0]
-        current_level = 1
-        for i, op in enumerate(self.ops):
-            # if we fork-strip, always take the stems for determining fan-in level
-            i0_idx = stems[op[2]] if stems[op[2]] >= 0 else op[2]
-            i1_idx = stems[op[3]] if stems[op[3]] >= 0 else op[3]
-            i2_idx = stems[op[4]] if stems[op[4]] >= 0 else op[4]
-            i3_idx = stems[op[5]] if stems[op[5]] >= 0 else op[5]
-            if levels[i0_idx] >= current_level or levels[i1_idx] >= current_level or levels[i2_idx] >= current_level or levels[i3_idx] >= current_level:
-                current_level += 1
-                level_starts.append(i)
-            levels[op[1]] = current_level  # set level of the output line
-            ref_count[i0_idx] += 1
-            ref_count[i1_idx] += 1
-            ref_count[i2_idx] += 1
-            ref_count[i3_idx] += 1
-        self.level_starts = np.asarray(level_starts, dtype='int32')
-        self.level_stops = np.asarray(level_starts[1:] + [len(self.ops)], dtype='int32')
+        ref_count = np.zeros(self.c_locs_len, dtype=np.int32)
+
+        for op in self.ops:
+            for x in [2, 3, 4, 5]:
+                ref_count[stems[op[x]] if stems[op[x]] >= 0 else op[x]] += 1
 
         # combinational signal allocation table. maps line and interface indices to self.c memory locations
         self.c_locs = np.full((self.c_locs_len,), -1, dtype=np.int32)
@@ -278,9 +276,9 @@ class SimOps:
                 ref_count[i0_idx] += 1
 
         # allocate memory for the rest of the circuit
-        for op_start, op_stop in zip(self.level_starts, self.level_stops):
+        for ops in self.levels:
             free_set = set()
-            for op in self.ops[op_start:op_stop]:
+            for op in ops:
                 # if we fork-strip, always take the stems
                 i0_idx = stems[op[2]] if stems[op[2]] >= 0 else op[2]
                 i1_idx = stems[op[3]] if stems[op[3]] >= 0 else op[3]
@@ -299,7 +297,8 @@ class SimOps:
                 self.c_locs[o_idx], self.c_caps[o_idx] = h.alloc(cap), cap
             if c_reuse:
                 for loc in free_set:
-                    h.free(loc)
+                    if loc >= 0:  # DFF clocks are not allocated. Ignore for now.
+                        h.free(loc)
 
         # copy memory location and capacity from stems to fanout lines
         for lidx, stem in enumerate(stems):
@@ -310,6 +309,15 @@ class SimOps:
         for i, n in enumerate(circuit.s_nodes):
             if len(n.ins) > 0:
                 self.c_locs[self.ppo_offset + i], self.c_caps[self.ppo_offset + i] = self.c_locs[n.ins[0]], self.c_caps[n.ins[0]]
+
+        # line use information
+        self.line_use_start = np.full(self.c_locs_len, -1, dtype=np.int32)
+        self.line_use_stop = np.full(self.c_locs_len, len(self.levels), dtype=np.int32)
+        for i, lv in enumerate(self.levels):
+            for op in lv:
+                self.line_use_start[op[1]] = i
+                for x in [2, 3, 4, 5]:
+                    self.line_use_stop[op[x]] = i
 
         self.c_len = h.max_size
 

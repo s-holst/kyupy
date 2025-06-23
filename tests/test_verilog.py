@@ -1,5 +1,5 @@
 from kyupy import verilog
-from kyupy.techlib import SAED90, SAED32
+from kyupy.techlib import SAED90, SAED32, NANGATE45
 
 def test_b01(mydir):
     with open(mydir / 'b01.v', 'r') as f:
@@ -26,12 +26,12 @@ def test_b15(mydir):
 
 
 def test_gates(mydir):
-    c = verilog.load(mydir / 'gates.v', tlib=SAED90)
-    assert len(c.nodes) == 10
-    assert len(c.lines) == 10
+    c = verilog.load(mydir / 'gates.v', tlib=NANGATE45)
+    assert len(c.nodes) == 18
+    assert len(c.lines) == 21
     stats = c.stats
-    assert stats['input'] == 2
-    assert stats['output'] == 2
+    assert stats['input'] == 3
+    assert stats['output'] == 4
     assert stats['__seq__'] == 0
 
 
